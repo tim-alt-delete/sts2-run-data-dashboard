@@ -59,6 +59,18 @@ RUN_COLUMNS = [
     "killed_by",
     "build",
     "floors_climbed",
+    "seed",
+]
+
+PATH_COLUMNS = [
+    "floor",
+    "act",
+    "type",
+    "room",
+    "monsters",
+    "turns",
+    "hp",
+    "gold",
 ]
 
 
@@ -255,41 +267,173 @@ def load_runs(archive_dir: Path | str) -> list[dict]:
     ]
 
 
+def run_result(run: dict) -> str:
+    """Win / Loss / Abandoned.
+
+    progress.save lumps abandons in with losses; the run files keep them apart,
+    so this is a finer breakdown than the character table can give.
+    """
+    if run.get("was_abandoned"):
+        return "Abandoned"
+    return "Win" if run.get("win") else "Loss"
+
+
+def run_killed_by(run: dict) -> str:
+    """What ended the run, humanized. Blank for wins and abandons."""
+    killed = run.get("killed_by_encounter") or "NONE.NONE"
+    if entry(killed) == "NONE":
+        killed = run.get("killed_by_event") or "NONE.NONE"
+    return humanize(entry(killed)) if entry(killed) != "NONE" else ""
+
+
 def runs_table(archive_dir: Path | str) -> pd.DataFrame:
-    """One row per archived run, newest first."""
+    """One row per archived run, newest first.
+
+    Keeps run_id (the start_time, which is also the filename) so rows can link
+    to the detail page.
+    """
     rows = []
     for run in load_runs(archive_dir):
         player = (run.get("players") or [{}])[0]
-
-        killed = run.get("killed_by_encounter") or "NONE.NONE"
-        if entry(killed) == "NONE":
-            killed = run.get("killed_by_event") or "NONE.NONE"
-        killed_entry = entry(killed)
-
-        if run.get("was_abandoned"):
-            result = "Abandoned"
-        elif run.get("win"):
-            result = "Win"
-        else:
-            result = "Loss"
-
         start_time = run.get("start_time", 0)
         rows.append(
             {
-                "start_time": start_time,
+                "run_id": start_time,
                 "date": datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M"),
                 "character": entry(player.get("character")),
                 "ascension": run.get("ascension", 0),
-                "result": result,
-                "killed_by": humanize(killed_entry) if killed_entry != "NONE" else "",
+                "result": run_result(run),
+                "killed_by": run_killed_by(run),
                 "build": run.get("build_id", "?"),
                 "floors_climbed": sum(len(act) for act in run.get("map_point_history", [])),
+                "seed": run.get("seed", ""),
             }
         )
 
-    table = pd.DataFrame(rows, columns=["start_time", *RUN_COLUMNS])
-    table = table.sort_values("start_time", ascending=False, ignore_index=True)
-    return table.drop(columns="start_time")
+    table = pd.DataFrame(rows, columns=["run_id", *RUN_COLUMNS])
+    return table.sort_values("run_id", ascending=False, ignore_index=True)
+
+
+def load_run(archive_dir: Path | str, run_id: int) -> dict | None:
+    """One archived run by id. The id is the start_time and the filename."""
+    path = Path(archive_dir) / f"{run_id}.run"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def run_summary(run: dict) -> dict:
+    """Headline facts for the top of the run detail page."""
+    player = (run.get("players") or [{}])[0]
+    history = run.get("map_point_history", [])
+
+    final = {}
+    for act in history:
+        for point in act:
+            for stats in point.get("player_stats", []):
+                final = stats
+
+    return {
+        "run_id": run.get("start_time", 0),
+        "date": datetime.fromtimestamp(run.get("start_time", 0)).strftime("%Y-%m-%d %H:%M"),
+        "character": entry(player.get("character")),
+        "result": run_result(run),
+        "ascension": run.get("ascension", 0),
+        "game_mode": (run.get("game_mode") or "").title(),
+        "seed": run.get("seed", ""),
+        "build": run.get("build_id", "?"),
+        "run_time": duration(run.get("run_time", 0)),
+        "floors_climbed": sum(len(act) for act in history),
+        "killed_by": run_killed_by(run),
+        "final_hp": f"{final.get('current_hp', 0)}/{final.get('max_hp', 0)}" if final else "",
+        "deck_size": len(player.get("deck") or []),
+        "relic_count": len(player.get("relics") or []),
+        "badges": ", ".join(
+            f"{humanize(b.get('id', ''))} ({b.get('rarity', '')})"
+            for b in player.get("badges") or []
+        ),
+    }
+
+
+def describe_monsters(room: dict) -> str:
+    """'Wriggler x4'. Monster lists repeat the same id per copy."""
+    counts: dict[str, int] = {}
+    for monster in room.get("monster_ids") or []:
+        name = humanize(entry(monster))
+        counts[name] = counts.get(name, 0) + 1
+    return ", ".join(n if c == 1 else f"{n} \u00d7{c}" for n, c in counts.items())
+
+
+def run_path_table(run: dict) -> pd.DataFrame:
+    """Floor by floor. One row per map point.
+
+    A map point can hold more than one room: an event that leads into a fight
+    records both, so rooms are joined rather than indexed.
+    """
+    acts = run.get("acts") or []
+    rows = []
+    floor = 0
+
+    for act_index, act in enumerate(run.get("map_point_history", [])):
+        # acts always lists the full planned run, even if it ended in act 1.
+        act_name = humanize(entry(acts[act_index])) if act_index < len(acts) else ""
+
+        for point in act:
+            floor += 1
+            rooms = point.get("rooms") or []
+            stats = (point.get("player_stats") or [{}])[0]
+
+            # Rest sites, treasure and shops carry no model_id, only a room_type.
+            names = [humanize(entry(r.get("model_id"))) for r in rooms if r.get("model_id")]
+            monsters = [m for m in (describe_monsters(r) for r in rooms) if m]
+
+            rows.append(
+                {
+                    "floor": floor,
+                    "act": act_name,
+                    "type": humanize(point.get("map_point_type") or ""),
+                    "room": " \u2192 ".join(names),
+                    "monsters": ", ".join(monsters),
+                    "turns": sum(r.get("turns_taken", 0) for r in rooms),
+                    "hp": f"{stats.get('current_hp', 0)}/{stats.get('max_hp', 0)}",
+                    "gold": stats.get("current_gold", 0),
+                }
+            )
+
+    return pd.DataFrame(rows, columns=PATH_COLUMNS)
+
+
+def describe_card(card: dict) -> str:
+    """'Strike', 'Defend+', 'Stomp+ (Instinct)'."""
+    name = humanize(entry(card.get("id")))
+    name += "+" * card.get("current_upgrade_level", 0)
+    enchantment = (card.get("enchantment") or {}).get("id")
+    if enchantment:
+        name += f" ({humanize(entry(enchantment))})"
+    return name
+
+
+def deck_table(run: dict) -> pd.DataFrame:
+    """Final deck, grouped so duplicates read as 'Strike x5'."""
+    player = (run.get("players") or [{}])[0]
+    counts: dict[str, int] = {}
+    for card in player.get("deck") or []:
+        name = describe_card(card)
+        counts[name] = counts.get(name, 0) + 1
+
+    rows = [{"card": name, "count": count} for name, count in sorted(counts.items())]
+    return pd.DataFrame(rows, columns=["card", "count"])
+
+
+def relic_table(run: dict) -> pd.DataFrame:
+    """Relics held at the end, in the order they were picked up."""
+    player = (run.get("players") or [{}])[0]
+    rows = [
+        {"relic": humanize(entry(r.get("id"))), "floor": r.get("floor_added_to_deck", 0)}
+        for r in player.get("relics") or []
+    ]
+    table = pd.DataFrame(rows, columns=["relic", "floor"])
+    return table.sort_values("floor", ignore_index=True)
 
 
 def data_loss_report(progress: dict, saves_dir: Path | str) -> dict:

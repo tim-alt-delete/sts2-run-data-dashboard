@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Run detail — Slay the Spire 2 stats</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+{% if error %}
+  <h1>Run detail</h1>
+  <p class="warn">{{ error }}</p>
+  <p class="note"><a href="/runs">← Run history</a></p>
+{% else %}
+  <h1>{{ summary.character }} &middot;
+    <span class="{{ summary.result|lower }}">{{ summary.result }}</span>
+  </h1>
+  <p class="note">{{ profile.label }} &middot;
+    <a href="{{ url_for('runs', saves=profile.saves) }}">← Run history</a></p>
+
+  <p class="totals">
+    {{ summary.date }} &middot;
+    Ascension <strong>{{ summary.ascension }}</strong> &middot;
+    {{ summary.floors_climbed }} floors &middot;
+    {{ summary.run_time }} &middot;
+    {{ summary.final_hp }} HP
+    {%- if summary.killed_by %} &middot; killed by <strong>{{ summary.killed_by }}</strong>{% endif %}
+  </p>
+
+  <p class="note">
+    {{ summary.deck_size }} cards &middot;
+    {{ summary.relic_count }} relics &middot;
+    {{ summary.game_mode }} &middot;
+    build {{ summary.build }} &middot;
+    seed <code>{{ summary.seed }}</code>
+    {%- if summary.badges %} &middot; {{ summary.badges }}{% endif %}
+  </p>
+
+  <h2>Path</h2>
+  {{ path|safe }}
+
+  <h2>Deck</h2>
+  {{ deck|safe }}
+
+  <h2>Relics</h2>
+  {{ relics|safe }}
+{% endif %}
+
+</body>
+</html>

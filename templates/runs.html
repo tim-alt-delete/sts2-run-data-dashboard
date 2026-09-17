@@ -46,7 +46,25 @@
 
   <p class="note">{{ run_count }} run{{ '' if run_count == 1 else 's' }}</p>
 
-  {{ runs|safe }}
+  <table class="stats">
+    <thead>
+      <tr>{% for column in columns %}<th>{{ column }}</th>{% endfor %}</tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+        <tr>
+          <td><a href="{{ url_for('run_detail', run_id=row.run_id, saves=profile.saves) }}">{{ row.date }}</a></td>
+          <td>{{ row.character }}</td>
+          <td>{{ row.ascension }}</td>
+          <td class="{{ row.result|lower }}">{{ row.result }}</td>
+          <td>{{ row.killed_by }}</td>
+          <td>{{ row.build }}</td>
+          <td>{{ row.floors_climbed }}</td>
+          <td>{{ row.seed }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
 {% endif %}
 
 </body>

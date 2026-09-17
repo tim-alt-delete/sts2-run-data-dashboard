@@ -57,6 +57,11 @@ def api_progress():
     return jsonify(sts2data.load_progress(selected_profile(profiles)["saves"]))
 
 
+def archive_dir_for(profile: dict):
+    """Where this profile's runs are archived."""
+    return sts2data.ARCHIVE / profile["label"].replace("/", "_")
+
+
 @app.route("/runs")
 def runs():
     profiles = sts2data.find_profiles()
@@ -65,8 +70,7 @@ def runs():
 
     profile = selected_profile(profiles)
     sts2data.archive_runs(profile["saves"], profile["label"])
-    archive_dir = sts2data.ARCHIVE / profile["label"].replace("/", "_")
-    table = sts2data.runs_table(archive_dir)
+    table = sts2data.runs_table(archive_dir_for(profile))
 
     characters = sorted(c for c in table["character"].unique() if c)
     character = request.args.get("character", "")
@@ -85,7 +89,33 @@ def runs():
         character=character,
         result=result,
         run_count=len(table),
-        runs=table.to_html(**TABLE_OPTIONS),
+        columns=sts2data.RUN_COLUMNS,
+        rows=table.to_dict("records"),
+    )
+
+
+@app.route("/run/<int:run_id>")
+def run_detail(run_id: int):
+    profiles = sts2data.find_profiles()
+    if not profiles:
+        return render_template("run.html", error=f"No save data found under {sts2data.BASE}"), 404
+
+    profile = selected_profile(profiles)
+    run = sts2data.load_run(archive_dir_for(profile), run_id)
+    if run is None:
+        return render_template(
+            "run.html",
+            profile=profile,
+            error=f"Run {run_id} is not in the archive for {profile['label']}.",
+        ), 404
+
+    return render_template(
+        "run.html",
+        profile=profile,
+        summary=sts2data.run_summary(run),
+        path=sts2data.run_path_table(run).to_html(**TABLE_OPTIONS),
+        deck=sts2data.deck_table(run).to_html(**TABLE_OPTIONS),
+        relics=sts2data.relic_table(run).to_html(**TABLE_OPTIONS),
     )
 
 

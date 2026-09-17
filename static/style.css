@@ -7,6 +7,8 @@
   --border: #2e3239;
   --hover: #1d2027;
   --code-bg: #23262d;
+  --win: #46c47e;
+  --loss: #e06b5c;
 }
 
 body {
@@ -23,6 +25,9 @@ label { margin-right: 1rem; }
 .totals { font-size: 1.1rem; margin: 1rem 0; }
 .note { color: var(--muted); font-size: 0.9rem; }
 .warn { color: var(--warn); }
+.win { color: var(--win); font-weight: 600; }
+.loss { color: var(--loss); }
+.abandoned { color: var(--muted); }
 
 code {
   background: var(--code-bg);
