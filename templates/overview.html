@@ -4,20 +4,23 @@
 {% block content %}
   <h1>{{ user.username }}</h1>
 
-  {% if run_count %}
+  {% if run_count or modded_count %}
     <p class="totals">
-      <strong>{{ run_count }}</strong> run{{ '' if run_count == 1 else 's' }} uploaded
+      <strong>{{ run_count }}</strong> run{{ '' if run_count == 1 else 's' }}
       {%- if modded_count %} &middot;
         <span class="note">{{ modded_count }} modded, kept separate</span>
       {%- endif %}
     </p>
+
+    <p class="note">
+      <a href="{{ url_for('user_runs', username=user.username) }}">Run history →</a>
+      &middot; <a href="{{ url_for('upload') }}">Upload more</a>
+    </p>
+
     <section class="card">
       <h2>Stats are coming next</h2>
-      <p>Your runs are stored. The character and card breakdowns built from them
-        land in the next change. For now the
-        <a href="{{ url_for('local_stats') }}">local save reader</a> still works
-        against this machine's save folder.</p>
-      <p><a href="{{ url_for('upload') }}">Upload more runs →</a></p>
+      <p>Your runs are browsable now. The character and card breakdowns built
+        from them land in the next change.</p>
     </section>
   {% else %}
     <section class="card">

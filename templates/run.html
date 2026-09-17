@@ -6,13 +6,14 @@
 {% if error %}
   <h1>Run detail</h1>
   <p class="warn">{{ error }}</p>
-  <p class="note"><a href="{{ url_for('runs') }}">← Run history</a></p>
+  <p class="note"><a href="{{ url_for('user_runs', username=user.username) }}">← Run history</a></p>
 {% else %}
   <h1>{{ summary.character }} &middot;
     <span class="{{ summary.result|lower }}">{{ summary.result }}</span>
   </h1>
-  <p class="note">{{ profile.label }} &middot;
-    <a href="{{ url_for('runs', saves=profile.saves) }}">← Run history</a></p>
+  <p class="note">{{ user.username }}
+    {%- if is_modded %} &middot; <span class="warn">modded run</span>{% endif %} &middot;
+    <a href="{{ url_for('user_runs', username=user.username) }}">← Run history</a></p>
 
   <p class="totals">
     {{ summary.date }} &middot;

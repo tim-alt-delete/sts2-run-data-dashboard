@@ -99,6 +99,7 @@ class Run(db.Model):
 
     character = db.Column(db.String(64))
     result = db.Column(db.String(16))
+    killed_by = db.Column(db.String(64))
     ascension = db.Column(db.Integer)
     seed = db.Column(db.String(32))
     build = db.Column(db.String(32))

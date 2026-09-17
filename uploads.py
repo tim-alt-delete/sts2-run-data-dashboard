@@ -158,6 +158,7 @@ def run_metadata(obj: dict) -> dict[str, Any]:
         "start_time": obj["start_time"],
         "character": sts2data.entry(player.get("character")),
         "result": sts2data.run_result(obj),
+        "killed_by": sts2data.run_killed_by(obj)[:64],
         "ascension": obj.get("ascension") if isinstance(obj.get("ascension"), int) else 0,
         "seed": str(obj.get("seed") or "")[:32],
         "build": str(obj.get("build_id") or "")[:32],

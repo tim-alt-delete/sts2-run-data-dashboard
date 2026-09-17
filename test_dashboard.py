@@ -1,8 +1,7 @@
 """Self-check for the dashboard.
 
-Runs without the game installed, against a synthetic save tree and an
-in-memory database, so you can confirm the install works before pointing it at
-real save data.
+Runs without the game installed, against fixture save data and an in-memory
+database, so you can confirm the install works before uploading anything real.
 
     python test_dashboard.py
 
@@ -14,7 +13,6 @@ import io
 import json
 import os
 import re
-import shutil
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -37,8 +35,6 @@ def make_client(username: str | None = "tim"):
     if username:
         client.post("/register", data={"username": username, "password": PASSWORD})
     return app, client
-
-USER = "76561198182361854"
 
 VANILLA_PROGRESS = {
     "schema_version": 3,
@@ -170,89 +166,8 @@ RUN_FILES = {
 }
 
 
-def build_fixture(root: Path) -> None:
-    vanilla = root / "steam" / USER / "profile1" / "saves"
-    modded = root / "steam" / USER / "modded" / "profile1" / "saves"
-    (vanilla / "history").mkdir(parents=True)
-    modded.mkdir(parents=True)
-
-    (vanilla / "progress.save").write_text(json.dumps(VANILLA_PROGRESS), encoding="utf-8")
-    (modded / "progress.save").write_text(json.dumps(MODDED_PROGRESS), encoding="utf-8")
-
-    for name, content in RUN_FILES.items():
-        (vanilla / "history" / name).write_text(json.dumps(content), encoding="utf-8")
-    # The game's own sidecar files, which must be ignored.
-    (vanilla / "history" / "1789424859.run.backup").write_text("{}", encoding="utf-8")
-    (vanilla / "history" / "1789111111.corrupt").write_text("{}", encoding="utf-8")
-
-
-def check_loader(archive: Path) -> None:
-    profiles = sts2data.find_profiles()
-    assert len(profiles) == 2, profiles
-    assert [p["is_modded"] for p in profiles] == [False, True]
-    assert profiles[0]["runs"] == 15 and profiles[0]["run_files"] == 3
-    assert profiles[1]["runs"] == 0
-
-    profile = sts2data.default_profile(profiles)
-    assert not profile["is_modded"], "must default to vanilla, not the newer empty modded tree"
-
-    progress = sts2data.load_progress(profile["saves"])
-    assert sts2data.totals(progress) == {
-        "runs": 15, "wins": 3, "losses": 12, "win_rate": 20.0,
-        "playtime": "12:34:56", "floors_climbed": 611,
-    }
-
-    characters = sts2data.character_table(progress)
-    assert list(characters["character"]) == ["IRONCLAD", "SILENT", "DEFECT"], "sorted by runs"
-    assert characters.loc[0, "win_rate"] == 30.0
-    assert characters.loc[0, "fastest_win"] == "1:02:05", "fastest_win_time is seconds"
-    assert pd.isna(characters.loc[1, "fastest_win"]), "-1 means no win yet"
-    assert pd.isna(characters.loc[2, "win_rate"]), "zero runs must not divide by zero"
-
-    cards = sts2data.card_table(progress, min_runs=5)
-    assert list(cards["card"]) == ["OFFERING", "STRIKE"], list(cards["card"])
-    assert "LUCKY_ONCE" not in list(cards["card"]), "1-run card must be filtered"
-    assert cards.loc[0, "win_rate"] == 50.0 and cards.loc[0, "pick_rate"] == 90.0
-    assert sts2data.card_table(progress, min_runs=0).shape[0] == 4, "absent keys default to 0"
-
-    assert sts2data.data_loss_report(progress, profile["saves"]) == {
-        "recorded": 15, "on_disk": 3, "missing": 12,
-    }
-
-    assert sts2data.archive_runs(profile["saves"], profile["label"]) == 3
-    assert sts2data.archive_runs(profile["saves"], profile["label"]) == 0, "must not recopy"
-    copied = sorted(p.name for p in archive.rglob("*") if p.is_file())
-    assert copied == ["1789424859.run", "1789508732.run", "1789515832.run"], copied
-
-    # The empty modded profile must render, not crash.
-    empty = sts2data.load_progress(profiles[1]["saves"])
-    assert sts2data.character_table(empty).empty
-    assert sts2data.card_table(empty).empty
-    assert sts2data.totals(empty)["win_rate"] is None
-
-    runs = sts2data.runs_table(archive / profile["label"].replace("/", "_"))
-    assert list(runs["character"]) == ["DEFECT", "SILENT", "IRONCLAD"], "newest first"
-    assert list(runs["result"]) == ["Abandoned", "Loss", "Win"]
-    assert list(runs["ascension"]) == [1, 0, 4]
-    assert list(runs["floors_climbed"]) == [2, 6, 5]
-    assert list(runs["build"]) == ["v0.107.2", "v0.107.1", "v0.107.1"]
-    assert list(runs["seed"]) == ["QLDTDQLGQY", "0VD3JRH6FY", "3J6ZXDRGZE"]
-    assert list(runs["run_id"]) == [1789515832, 1789508732, 1789424859], "run_id links the detail page"
-    assert runs.loc[1, "killed_by"] == "Owl Magistrate Normal"
-    assert runs.loc[0, "killed_by"] == "" and runs.loc[2, "killed_by"] == "", \
-        "abandoned and win must not show a killer"
-    assert runs.loc[0, "date"] == datetime.fromtimestamp(1789515832).strftime("%Y-%m-%d %H:%M")
-
-    print("loader          ok")
-
-
-def check_run_detail(archive: Path) -> None:
-    archive_dir = archive / f"steam_{USER}_vanilla_profile1"
-
-    assert sts2data.load_run(archive_dir, 1789424859) is not None
-    assert sts2data.load_run(archive_dir, 9999999999) is None, "missing run must be None, not raise"
-
-    run = sts2data.load_run(archive_dir, 1789424859)
+def check_parsing() -> None:
+    run = RUN_FILES["1789424859.run"]
     summary = sts2data.run_summary(run)
     assert summary["character"] == "IRONCLAD"
     assert summary["result"] == "Win"
@@ -310,7 +225,133 @@ def check_run_detail(archive: Path) -> None:
     assert list(relics["source"]) == ["Starting", "Rest Site", "Starting"], \
         "source comes from what the floor recorded, not the room type alone"
 
-    print("run detail      ok")
+    print("parsing         ok")
+
+
+def check_progress_tables() -> None:
+    """progress.save aggregates. Runs take over from these in the next change,
+    but the lifetime panel still reads them."""
+    progress = VANILLA_PROGRESS
+
+    assert sts2data.totals(progress) == {
+        "runs": 15, "wins": 3, "losses": 12, "win_rate": 20.0,
+        "playtime": "12:34:56", "floors_climbed": 611,
+    }
+
+    characters = sts2data.character_table(progress)
+    assert list(characters["character"]) == ["IRONCLAD", "SILENT", "DEFECT"], "sorted by runs"
+    assert characters.loc[0, "win_rate"] == 30.0
+    assert characters.loc[0, "fastest_win"] == "1:02:05", "fastest_win_time is seconds"
+    assert pd.isna(characters.loc[1, "fastest_win"]), "-1 means no win yet"
+    assert pd.isna(characters.loc[2, "win_rate"]), "zero runs must not divide by zero"
+
+    cards = sts2data.card_table(progress, min_runs=5)
+    assert list(cards["card"]) == ["OFFERING", "STRIKE"], list(cards["card"])
+    assert "LUCKY_ONCE" not in list(cards["card"]), "1-run card must be filtered"
+    assert cards.loc[0, "win_rate"] == 50.0 and cards.loc[0, "pick_rate"] == 90.0
+    assert sts2data.card_table(progress, min_runs=0).shape[0] == 4, "absent keys default to 0"
+
+    # the gap between lifetime totals and what has actually been uploaded
+    assert sts2data.data_loss_report(progress, uploaded=3) == {
+        "recorded": 15, "uploaded": 3, "missing": 12,
+    }
+    assert sts2data.data_loss_report(progress, uploaded=99)["missing"] == 0, \
+        "more uploads than the game recorded is not negative loss"
+
+    print("progress tables ok")
+
+
+def upload_runs(client, names=None, modded=False):
+    """Push fixture runs through the real upload route."""
+    names = names or list(RUN_FILES)
+    data = {"files": [(io.BytesIO(json.dumps(RUN_FILES[n]).encode()), n) for n in names]}
+    if modded:
+        data["modded"] = "1"
+    return client.post("/upload", data=data, content_type="multipart/form-data")
+
+
+def check_run_pages() -> None:
+    _app, client = make_client("tim")
+    upload_runs(client)
+
+    body = client.get("/u/tim/runs").get_data(as_text=True)
+    assert "3 runs" in body
+    assert "IRONCLAD" in body and "SILENT" in body and "DEFECT" in body
+    assert "Owl Magistrate Normal" in body, "killed_by comes from its own column now"
+    assert "3J6ZXDRGZE" in body, "seed column"
+    assert '<td class="win">Win</td>' in body
+    assert '<td class="loss">Loss</td>' in body
+    assert '<td class="abandoned">Abandoned</td>' in body
+    assert "/u/tim/run/1789424859" in body, "date links to the detail page"
+
+    # filters
+    table = table_html(client.get("/u/tim/runs?character=SILENT").get_data(as_text=True))
+    assert "Owl Magistrate Normal" in table
+    assert "IRONCLAD" not in table and "DEFECT" not in table
+
+    body = client.get("/u/tim/runs?result=Abandoned").get_data(as_text=True)
+    assert "1 run" in body and "1 runs" not in body, "singular count"
+    assert "DEFECT" in table_html(body)
+
+    assert "0 runs" in client.get("/u/tim/runs?character=NOBODY").get_data(as_text=True)
+
+    # detail page, rendered from the stored JSON
+    response = client.get("/u/tim/run/1789424859")
+    assert response.status_code == 200
+    body = response.get_data(as_text=True)
+    assert "IRONCLAD" in body and "3J6ZXDRGZE" in body
+    assert "Dense Vegetation \u2192 Dense Vegetation Event Encounter" in body
+    assert '<span class="gain">+Setup Strike</span>' in body
+    assert '<span class="skip">skipped Tremble, Blood Wall</span>' in body
+    assert "Byrdonis Egg \u2192 Byrd Swoop" in body and "Rest Site" in body
+
+    missing = client.get("/u/tim/run/9999999999")
+    assert missing.status_code == 404 and "not in your uploads" in missing.get_data(as_text=True)
+
+    print("run pages       ok")
+
+
+def check_run_pages_modded() -> None:
+    """Modded runs stay out of the way unless asked for."""
+    _app, client = make_client("tim")
+    upload_runs(client, ["1789424859.run"])
+    upload_runs(client, ["1789508732.run"], modded=True)
+
+    vanilla = client.get("/u/tim/runs").get_data(as_text=True)
+    assert "1 run" in vanilla and "IRONCLAD" in vanilla
+    assert "SILENT" not in table_html(vanilla), "modded runs are hidden by default"
+
+    modded = client.get("/u/tim/runs?tree=modded").get_data(as_text=True)
+    assert "SILENT" in table_html(modded) and "IRONCLAD" not in table_html(modded)
+
+    both = client.get("/u/tim/runs?tree=all").get_data(as_text=True)
+    assert "2 runs" in both
+    assert "(modded)" in both, "a modded run is labelled when both trees are shown"
+
+    # the overview counts them separately
+    overview = client.get("/u/tim").get_data(as_text=True)
+    assert "1 modded, kept separate" in re.sub(r"<[^>]+>|\s+", " ", overview)
+
+    print("run pages mod   ok")
+
+
+def check_run_pages_privacy() -> None:
+    _app, client = make_client("tim")
+    upload_runs(client, ["1789424859.run"])
+
+    _app2, other = make_client("someone-else")
+    # another account cannot reach tim's pages, nor his runs through its own URL
+    assert other.get("/u/tim/runs").status_code == 404
+    assert other.get("/u/tim/run/1789424859").status_code == 404
+    assert other.get("/u/someone-else/run/1789424859").status_code == 404, \
+        "runs are scoped to their owner, not global by id"
+
+    _app3, anon = make_client(None)
+    for path in ("/u/tim", "/u/tim/runs", "/u/tim/run/1789424859"):
+        r = anon.get(path)
+        assert r.status_code == 302 and r.headers["Location"].startswith("/?next="), path
+
+    print("run pages priv  ok")
 
 
 def table_html(body: str) -> str:
@@ -387,7 +428,7 @@ def check_privacy() -> None:
 
     # logged out, protected pages redirect to the landing page rather than render
     _app, anon = make_client(username=None)
-    for path in ("/u/tim", "/local", "/local/runs", "/local/run/1789424859"):
+    for path in ("/u/tim", "/u/tim/runs", "/upload"):
         r = anon.get(path)
         assert r.status_code == 302 and r.headers["Location"].startswith("/?next="), \
             f"{path} must require a login, got {r.status_code}"
@@ -656,104 +697,21 @@ def check_upload_privacy() -> None:
     print("upload privacy  ok")
 
 
-def check_routes() -> None:
-    _app, client = make_client()
-    modded = sts2data.find_profiles()[1]["saves"]
-
-    body = client.get("/local").get_data(as_text=True)
-    assert "IRONCLAD" in body and "OFFERING" in body
-    assert "LUCKY_ONCE" not in body
-    assert "20.0%</strong> win rate" in body
-    assert "12 were pruned" in body
-    assert 'href="/static/style.css"' in body, "page must link the stylesheet"
-    assert client.get("/static/style.css").status_code == 200, "stylesheet must actually be served"
-
-    assert "LUCKY_ONCE" in client.get("/local?min_runs=0").get_data(as_text=True)
-    assert "modded save tree" in client.get(f"/local?saves={modded}").get_data(as_text=True)
-    assert "IRONCLAD" in client.get("/local?saves=/etc/passwd").get_data(as_text=True), \
-        "unknown path must fall back, not read an arbitrary file"
-    assert client.get("/local/api/progress").get_json()["character_stats"][0]["id"] == "CHARACTER.IRONCLAD"
-
-    body = client.get("/local/runs").get_data(as_text=True)
-    assert "IRONCLAD" in body and "SILENT" in body and "DEFECT" in body
-    assert "Owl Magistrate Normal" in body
-    assert "3 runs" in body
-
-    body = client.get("/local/runs?character=SILENT").get_data(as_text=True)
-    table = table_html(body)
-    assert "Owl Magistrate Normal" in table
-    assert "IRONCLAD" not in table and "DEFECT" not in table
-    assert "1 run" in body and "1 runs" not in body, "singular count"
-
-    body = client.get("/local/runs?result=Abandoned").get_data(as_text=True)
-    table = table_html(body)
-    assert "DEFECT" in table
-    assert "IRONCLAD" not in table and "SILENT" not in table
-
-    body = client.get(f"/local/runs?saves={modded}").get_data(as_text=True)
-    assert "0 runs" in body, "empty modded profile must render, not crash"
-
-    body = client.get("/local/runs").get_data(as_text=True)
-    assert "3J6ZXDRGZE" in body, "seed column"
-    assert '<td class="win">Win</td>' in body and '<td class="loss">Loss</td>' in body
-    assert '<td class="abandoned">Abandoned</td>' in body
-    assert "/local/run/1789424859" in body, "date cell links to the detail page"
-
-    response = client.get("/local/run/1789424859")
-    assert response.status_code == 200
-    body = response.get_data(as_text=True)
-    assert "IRONCLAD" in body and "3J6ZXDRGZE" in body
-    assert "Dense Vegetation \u2192 Dense Vegetation Event Encounter" in body
-    assert "Strike Ironclad" in body and "Burning Blood" in body
-    assert '<span class="gain">+Setup Strike</span>' in body
-    assert '<span class="skip">skipped Tremble, Blood Wall</span>' in body, \
-        "declined rewards render muted"
-    assert "Byrdonis Egg \u2192 Byrd Swoop" in body and "Rest Site" in body, \
-        "relic provenance is visible without cross-referencing the path"
-
-    missing = client.get("/local/run/9999999999")
-    assert missing.status_code == 404, "unarchived run must 404"
-    assert "not in the archive" in missing.get_data(as_text=True)
-
-    print("routes          ok")
-
-
-def check_missing_saves() -> None:
-    original = sts2data.BASE
-    sts2data.BASE = Path(tempfile.gettempdir()) / "sts2-definitely-not-here"
-    try:
-        _app, client = make_client()
-        assert "No save data found" in client.get("/local").get_data(as_text=True)
-        assert "No save data found" in client.get("/local/runs").get_data(as_text=True)
-    finally:
-        sts2data.BASE = original
-    print("no save data    ok")
-
-
 def main() -> None:
-    original_base, original_archive = sts2data.BASE, sts2data.ARCHIVE
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        build_fixture(root)
-        archive = root / "archive"
-        sts2data.BASE, sts2data.ARCHIVE = root, archive
-        try:
-            check_loader(archive)
-            check_run_detail(archive)
-            check_auth()
-            check_privacy()
-            check_csrf()
-            check_secret_key()
-            check_upload()
-            check_upload_form()
-            check_upload_folder()
-            check_upload_modded()
-            check_upload_privacy()
-            check_routes()
-            check_missing_saves()
-        finally:
-            sts2data.BASE, sts2data.ARCHIVE = original_base, original_archive
-            shutil.rmtree(archive, ignore_errors=True)
+    check_parsing()
+    check_progress_tables()
+    check_auth()
+    check_privacy()
+    check_csrf()
+    check_secret_key()
+    check_upload()
+    check_upload_form()
+    check_upload_folder()
+    check_upload_modded()
+    check_upload_privacy()
+    check_run_pages()
+    check_run_pages_modded()
+    check_run_pages_privacy()
     print("\nall checks passed")
 
 

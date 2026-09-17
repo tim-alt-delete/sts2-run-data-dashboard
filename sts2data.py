@@ -1,32 +1,19 @@
-"""Read Slay the Spire 2 save data into pandas DataFrames.
+"""Turn Slay the Spire 2 save data into pandas DataFrames.
 
-The game writes plain UTF-8 JSON, unencrypted, via temp-file + atomic rename,
-so these files are safe to read while the game is running.
+Pure parsing. Everything here takes an already-decoded dict, so it does not
+care whether that came from an upload, the database, or a file on disk.
 
-Layout (macOS):
-    ~/Library/Application Support/SlayTheSpire2/{platform}/{userId}/[modded/]profile{N}/saves/
-        progress.save        lifetime aggregates
-        history/{start}.run  one file per finished run, pruned at 100 files / 5 MB
-
-Loading any mod flips the game to the separate `modded/` tree, which starts as a
-fresh default profile. Modded runs never touch vanilla stats.
-
-Run this file directly to check path discovery and parsing:
-    python sts2data.py
+Two shapes go in:
+  - a run file, one per finished run, holding the full path and every choice
+  - progress.save, the game's lifetime aggregates
 """
 
 from __future__ import annotations
 
-import json
-import shutil
 from collections import Counter
 from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
-
-BASE = Path.home() / "Library/Application Support/SlayTheSpire2"
-ARCHIVE = Path(__file__).resolve().parent / "archive"
 
 CHARACTER_COLUMNS = [
     "character",
@@ -101,62 +88,6 @@ def duration(seconds: int | None) -> str | None:
     hours, rest = divmod(int(seconds), 3600)
     minutes, secs = divmod(rest, 60)
     return f"{hours}:{minutes:02d}:{secs:02d}"
-
-
-def find_profiles(base: Path | str | None = None) -> list[dict]:
-    """Every profile with a progress.save, vanilla and modded.
-
-    The Steam ID is discovered, never hardcoded. Pass `base` to read a copied
-    or backed-up save tree instead of the live one.
-    """
-    base = Path(base) if base else BASE
-    saves_dirs = sorted(base.glob("*/*/profile*/saves"))
-    saves_dirs += sorted(base.glob("*/*/modded/profile*/saves"))
-
-    profiles = []
-    for saves in saves_dirs:
-        if not (saves / "progress.save").exists():
-            continue
-
-        relative = saves.relative_to(base).parts  # platform/userId/[modded]/profileN/saves
-        is_modded = "modded" in relative
-        platform, user_id = relative[0], relative[1]
-
-        try:
-            runs = total_runs(load_progress(saves))
-        except (OSError, ValueError):
-            runs = 0
-
-        profiles.append(
-            {
-                "label": f"{platform}/{user_id}/{'modded' if is_modded else 'vanilla'}/{saves.parent.name}",
-                "saves": str(saves),
-                "is_modded": is_modded,
-                "runs": runs,
-                "run_files": len(run_files(saves)),
-            }
-        )
-    return profiles
-
-
-def default_profile(profiles: list[dict]) -> dict:
-    """Prefer vanilla, then whichever holds the most runs.
-
-    Not most-recently-modified: the modded tree is newer but typically empty.
-    """
-    return max(profiles, key=lambda p: (not p["is_modded"], p["runs"]))
-
-
-def load_progress(saves_dir: Path | str) -> dict:
-    """Parse progress.save."""
-    path = Path(saves_dir) / "progress.save"
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def run_files(saves_dir: Path | str) -> list[Path]:
-    """Finished-run files. The *.run glob excludes the game's own .backup and
-    .corrupt siblings."""
-    return sorted((Path(saves_dir) / "history").glob("*.run"))
 
 
 def total_runs(progress: dict) -> int:
@@ -238,37 +169,6 @@ def card_table(progress: dict, min_runs: int = 5) -> pd.DataFrame:
     )
 
 
-def archive_runs(saves_dir: Path | str, label: str, archive: Path | str | None = None) -> int:
-    """Copy new .run files into a local archive, return how many were new.
-
-    The game prunes history to 100 files / 5 MB, so runs disappear permanently.
-    Called on every dashboard load, which is what keeps the archive current.
-    """
-    destination = Path(archive) if archive else ARCHIVE
-    destination = destination / label.replace("/", "_")
-    destination.mkdir(parents=True, exist_ok=True)
-
-    copied = 0
-    for source in run_files(saves_dir):
-        target = destination / source.name
-        if not target.exists():
-            shutil.copy2(source, target)
-            copied += 1
-    return copied
-
-
-def load_runs(archive_dir: Path | str) -> list[dict]:
-    """Parse every archived .run file.
-
-    Reads the local archive, not the live history/ dir, so runs stay visible
-    after the game prunes them.
-    """
-    return [
-        json.loads(f.read_text(encoding="utf-8"))
-        for f in sorted(Path(archive_dir).glob("*.run"))
-    ]
-
-
 def run_result(run: dict) -> str:
     """Win / Loss / Abandoned.
 
@@ -286,42 +186,6 @@ def run_killed_by(run: dict) -> str:
     if entry(killed) == "NONE":
         killed = run.get("killed_by_event") or "NONE.NONE"
     return humanize(entry(killed)) if entry(killed) != "NONE" else ""
-
-
-def runs_table(archive_dir: Path | str) -> pd.DataFrame:
-    """One row per archived run, newest first.
-
-    Keeps run_id (the start_time, which is also the filename) so rows can link
-    to the detail page.
-    """
-    rows = []
-    for run in load_runs(archive_dir):
-        player = (run.get("players") or [{}])[0]
-        start_time = run.get("start_time", 0)
-        rows.append(
-            {
-                "run_id": start_time,
-                "date": datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M"),
-                "character": entry(player.get("character")),
-                "ascension": run.get("ascension", 0),
-                "result": run_result(run),
-                "killed_by": run_killed_by(run),
-                "build": run.get("build_id", "?"),
-                "floors_climbed": sum(len(act) for act in run.get("map_point_history", [])),
-                "seed": run.get("seed", ""),
-            }
-        )
-
-    table = pd.DataFrame(rows, columns=["run_id", *RUN_COLUMNS])
-    return table.sort_values("run_id", ascending=False, ignore_index=True)
-
-
-def load_run(archive_dir: Path | str, run_id: int) -> dict | None:
-    """One archived run by id. The id is the start_time and the filename."""
-    path = Path(archive_dir) / f"{run_id}.run"
-    if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def run_summary(run: dict) -> dict:
@@ -588,51 +452,15 @@ def relic_table(run: dict) -> pd.DataFrame:
     return table.sort_values("floor", ignore_index=True)
 
 
-def data_loss_report(progress: dict, saves_dir: Path | str) -> dict:
-    """How many finished runs the game no longer has files for.
+def data_loss_report(progress: dict, uploaded: int) -> dict:
+    """How many finished runs have no detail file.
 
-    progress.save counts every run forever; history/ gets pruned. The gap is
-    what has already been lost.
+    progress.save counts every run forever, while the game prunes its run
+    history at 100 files. The gap is what was lost before it could be uploaded.
     """
     recorded = total_runs(progress)
-    on_disk = len(run_files(saves_dir))
     return {
         "recorded": recorded,
-        "on_disk": on_disk,
-        "missing": max(0, recorded - on_disk),
+        "uploaded": uploaded,
+        "missing": max(0, recorded - uploaded),
     }
-
-
-def main() -> None:
-    profiles = find_profiles()
-    if not profiles:
-        print(f"No Slay the Spire 2 save data found under {BASE}")
-        return
-
-    print(f"Profiles found under {BASE}:")
-    for p in profiles:
-        print(f"  {p['label']}  runs={p['runs']}  run_files={p['run_files']}")
-
-    profile = default_profile(profiles)
-    print(f"\nUsing {profile['label']}")
-
-    progress = load_progress(profile["saves"])
-    summary = totals(progress)
-    print(
-        f"Runs {summary['runs']}  Wins {summary['wins']}  Losses {summary['losses']}"
-        f"  Win rate {summary['win_rate']}%  Playtime {summary['playtime']}"
-    )
-
-    print("\nPer character:")
-    print(character_table(progress).to_string(index=False, na_rep="-"))
-
-    loss = data_loss_report(progress, profile["saves"])
-    print(
-        f"\nRun files: {loss['on_disk']} on disk, {loss['recorded']} runs recorded, "
-        f"{loss['missing']} already pruned by the game"
-    )
-    print(f"Archived {archive_runs(profile['saves'], profile['label'])} new run files to {ARCHIVE}")
-
-
-if __name__ == "__main__":
-    main()

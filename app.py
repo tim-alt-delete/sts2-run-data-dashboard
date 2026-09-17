@@ -12,13 +12,13 @@ For anything other than local development, set a real secret key:
 
 from __future__ import annotations
 
+from datetime import datetime
 from urllib.parse import urlparse
 
 from flask import (
     Flask,
     abort,
     flash,
-    jsonify,
     redirect,
     render_template,
     request,
@@ -66,11 +66,34 @@ def create_app(config: type[app_config.Config] | None = None) -> Flask:
         # Fine while the schema is young. Introduce Alembic once migrating a
         # populated database matters.
         db.create_all()
+        check_schema()
 
     register_auth_routes(app)
     register_user_routes(app)
-    register_legacy_routes(app)
     return app
+
+
+def check_schema() -> None:
+    """Fail loudly when an existing database predates a model change.
+
+    create_all() only creates missing tables, it never alters existing ones, so
+    a column added to a model is silently absent until the table is rebuilt.
+    Without this the first query dies with a bare "no such column".
+    """
+    inspector = db.inspect(db.engine)
+    for model in (User, Run, ProgressSnapshot):
+        table = model.__tablename__
+        if not inspector.has_table(table):
+            continue
+        present = {c["name"] for c in inspector.get_columns(table)}
+        missing = {c.name for c in model.__table__.columns} - present
+        if missing:
+            raise RuntimeError(
+                f"Table '{table}' is missing {sorted(missing)}. The schema changed "
+                f"and there are no migrations yet. Delete the database and upload "
+                f"your saves again:\n"
+                f"    rm instance/app.db"
+            )
 
 
 def safe_next(target: str | None, fallback: str) -> str:
@@ -164,28 +187,123 @@ def register_auth_routes(app: Flask) -> None:
 
 
 def register_user_routes(app: Flask) -> None:
+    def owned(username: str):
+        """The signed-in user, or 404.
+
+        Profiles are private. A 403 would confirm the account exists, so
+        someone else's page is indistinguishable from a name nobody has taken.
+        """
+        if normalize_username(username) != current_user.username:
+            abort(404)
+        return current_user
+
+    def tree_filter(query, tree: str):
+        """Modded runs are kept out of the numbers unless asked for."""
+        if tree == "modded":
+            return query.filter_by(is_modded=True)
+        if tree == "all":
+            return query
+        return query.filter_by(is_modded=False)
+
     @app.route("/u/<username>")
     @login_required
     def overview(username: str):
-        # Profiles are private. A 403 here would confirm the account exists, so
-        # anything that is not yours looks the same as a name nobody has taken.
-        if normalize_username(username) != current_user.username:
-            abort(404)
-
+        user = owned(username)
         counts = db.session.execute(
-            db.select(Run.result, db.func.count())
-            .filter_by(user_id=current_user.id, is_modded=False)
-            .group_by(Run.result)
+            db.select(Run.is_modded, db.func.count())
+            .filter_by(user_id=user.id)
+            .group_by(Run.is_modded)
         ).all()
+        by_tree = {modded: n for modded, n in counts}
         return render_template(
             "overview.html",
-            user=current_user,
-            run_count=sum(n for _, n in counts),
-            modded_count=db.session.scalar(
-                db.select(db.func.count())
-                .select_from(Run)
-                .filter_by(user_id=current_user.id, is_modded=True)
-            ),
+            user=user,
+            run_count=by_tree.get(False, 0),
+            modded_count=by_tree.get(True, 0),
+        )
+
+    @app.route("/u/<username>/runs")
+    @login_required
+    def user_runs(username: str):
+        user = owned(username)
+        tree = request.args.get("tree", "vanilla")
+        character = request.args.get("character", "")
+        result = request.args.get("result", "")
+
+        # Only the display columns: the JSON blob is big and the list does not
+        # need it.
+        columns = (
+            Run.start_time, Run.character, Run.ascension, Run.result,
+            Run.killed_by, Run.build, Run.floors, Run.seed, Run.is_modded,
+        )
+        query = tree_filter(db.select(*columns).filter_by(user_id=user.id), tree)
+
+        # The character list is built before the character filter is applied,
+        # so choosing one does not empty the dropdown.
+        characters = sorted(
+            c for c in db.session.scalars(
+                tree_filter(
+                    db.select(Run.character).filter_by(user_id=user.id).distinct(), tree
+                )
+            ) if c
+        )
+
+        if character:
+            query = query.filter(Run.character == character)
+        if result:
+            query = query.filter(Run.result == result)
+
+        rows = [
+            {
+                "run_id": r.start_time,
+                "date": datetime.fromtimestamp(r.start_time).strftime("%Y-%m-%d %H:%M"),
+                "character": r.character,
+                "ascension": r.ascension,
+                "result": r.result,
+                "killed_by": r.killed_by or "",
+                "build": r.build,
+                "floors_climbed": r.floors,
+                "seed": r.seed,
+                "is_modded": r.is_modded,
+            }
+            for r in db.session.execute(query.order_by(Run.start_time.desc())).all()
+        ]
+
+        return render_template(
+            "runs.html",
+            user=user,
+            characters=characters,
+            character=character,
+            result=result,
+            tree=tree,
+            run_count=len(rows),
+            columns=sts2data.RUN_COLUMNS,
+            rows=rows,
+        )
+
+    @app.route("/u/<username>/run/<int:run_id>")
+    @login_required
+    def run_detail(username: str, run_id: int):
+        user = owned(username)
+        run = db.session.scalar(
+            db.select(Run).filter_by(user_id=user.id, start_time=run_id)
+        )
+        if run is None:
+            return render_template(
+                "run.html",
+                user=user,
+                error=f"Run {run_id} is not in your uploads.",
+            ), 404
+
+        return render_template(
+            "run.html",
+            user=user,
+            is_modded=run.is_modded,
+            summary=sts2data.run_summary(run.data),
+            path_columns=sts2data.PATH_COLUMNS,
+            path_rows=sts2data.run_path_table(run.data).to_dict("records"),
+            deck=sts2data.deck_table(run.data).to_html(**TABLE_OPTIONS),
+            relics=sts2data.relic_table(run.data).to_html(**TABLE_OPTIONS),
         )
 
     @app.route("/upload", methods=["GET", "POST"])
@@ -280,122 +398,6 @@ def ingest(files, user, force_modded: bool) -> dict:
         "progress": progress_saved,
         "skipped": skipped,
     }
-
-
-# --------------------------------------------------------------------------
-# legacy local-file routes
-#
-# These still read the save folder of whoever is running the server. They are
-# replaced by per-user pages backed by uploads once phase 3 lands, and are kept
-# working until then so the dashboard stays usable.
-# --------------------------------------------------------------------------
-
-
-def register_legacy_routes(app: Flask) -> None:
-    def selected_profile(profiles: list[dict]) -> dict:
-        wanted = request.args.get("saves")
-        for profile in profiles:
-            if profile["saves"] == wanted:
-                return profile
-        return sts2data.default_profile(profiles)
-
-    def archive_dir_for(profile: dict):
-        return sts2data.ARCHIVE / profile["label"].replace("/", "_")
-
-    @app.route("/local")
-    @login_required
-    def local_stats():
-        profiles = sts2data.find_profiles()
-        if not profiles:
-            return render_template(
-                "local.html", error=f"No save data found under {sts2data.BASE}"
-            )
-
-        profile = selected_profile(profiles)
-        progress = sts2data.load_progress(profile["saves"])
-        min_runs = request.args.get("min_runs", default=5, type=int)
-
-        return render_template(
-            "local.html",
-            profiles=profiles,
-            profile=profile,
-            min_runs=min_runs,
-            totals=sts2data.totals(progress),
-            loss=sts2data.data_loss_report(progress, profile["saves"]),
-            archived=sts2data.archive_runs(profile["saves"], profile["label"]),
-            characters=sts2data.character_table(progress).to_html(**TABLE_OPTIONS),
-            cards=sts2data.card_table(progress, min_runs).to_html(**TABLE_OPTIONS),
-        )
-
-    @app.route("/local/api/progress")
-    @login_required
-    def api_progress():
-        profiles = sts2data.find_profiles()
-        if not profiles:
-            return jsonify(error="No save data found"), 404
-        return jsonify(sts2data.load_progress(selected_profile(profiles)["saves"]))
-
-    @app.route("/local/runs")
-    @login_required
-    def runs():
-        profiles = sts2data.find_profiles()
-        if not profiles:
-            return render_template(
-                "runs.html", error=f"No save data found under {sts2data.BASE}"
-            )
-
-        profile = selected_profile(profiles)
-        sts2data.archive_runs(profile["saves"], profile["label"])
-        table = sts2data.runs_table(archive_dir_for(profile))
-
-        characters = sorted(c for c in table["character"].unique() if c)
-        character = request.args.get("character", "")
-        result = request.args.get("result", "")
-
-        if character:
-            table = table[table["character"] == character]
-        if result:
-            table = table[table["result"] == result]
-
-        return render_template(
-            "runs.html",
-            profiles=profiles,
-            profile=profile,
-            characters=characters,
-            character=character,
-            result=result,
-            run_count=len(table),
-            columns=sts2data.RUN_COLUMNS,
-            rows=table.to_dict("records"),
-        )
-
-    @app.route("/local/run/<int:run_id>")
-    @login_required
-    def run_detail(run_id: int):
-        profiles = sts2data.find_profiles()
-        if not profiles:
-            return render_template(
-                "run.html", error=f"No save data found under {sts2data.BASE}"
-            ), 404
-
-        profile = selected_profile(profiles)
-        run = sts2data.load_run(archive_dir_for(profile), run_id)
-        if run is None:
-            return render_template(
-                "run.html",
-                profile=profile,
-                error=f"Run {run_id} is not in the archive for {profile['label']}.",
-            ), 404
-
-        return render_template(
-            "run.html",
-            profile=profile,
-            summary=sts2data.run_summary(run),
-            path_columns=sts2data.PATH_COLUMNS,
-            path_rows=sts2data.run_path_table(run).to_dict("records"),
-            deck=sts2data.deck_table(run).to_html(**TABLE_OPTIONS),
-            relics=sts2data.relic_table(run).to_html(**TABLE_OPTIONS),
-        )
 
 
 # Flask's CLI discovers create_app() automatically, so there is no module-level

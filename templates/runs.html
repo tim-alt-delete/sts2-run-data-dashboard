@@ -2,26 +2,11 @@
 {% block title %}Run history — Slay the Spire 2 stats{% endblock %}
 
 {% block content %}
-
-{% if error %}
   <h1>Run history</h1>
-  <p class="warn">{{ error }}</p>
-  <p class="note">Expected a path like
-    <code>{platform}/{steamId}/profile1/saves/progress.save</code> under that directory.</p>
-{% else %}
-  <h1>Run history</h1>
-  <p class="note">{{ profile.label }} &middot; <a href="{{ url_for('local_stats') }}">← Local saves</a></p>
+  <p class="note">{{ user.username }} &middot;
+    <a href="{{ url_for('overview', username=user.username) }}">← Overview</a></p>
 
   <form method="get">
-    <label>Profile
-      <select name="saves" onchange="this.form.submit()">
-        {% for p in profiles %}
-          <option value="{{ p.saves }}" {% if p.saves == profile.saves %}selected{% endif %}>
-            {{ p.label }} — {{ p.runs }} runs
-          </option>
-        {% endfor %}
-      </select>
-    </label>
     <label>Character
       <select name="character" onchange="this.form.submit()">
         <option value="" {% if not character %}selected{% endif %}>All</option>
@@ -38,28 +23,42 @@
         {% endfor %}
       </select>
     </label>
+    <label>Save tree
+      <select name="tree" onchange="this.form.submit()">
+        {% for value, caption in [("vanilla", "Vanilla"), ("modded", "Modded"), ("all", "Both")] %}
+          <option value="{{ value }}" {% if value == tree %}selected{% endif %}>{{ caption }}</option>
+        {% endfor %}
+      </select>
+    </label>
   </form>
 
   <p class="note">{{ run_count }} run{{ '' if run_count == 1 else 's' }}</p>
 
-  <table class="stats">
-    <thead>
-      <tr>{% for column in columns %}<th>{{ column }}</th>{% endfor %}</tr>
-    </thead>
-    <tbody>
-      {% for row in rows %}
-        <tr>
-          <td><a href="{{ url_for('run_detail', run_id=row.run_id, saves=profile.saves) }}">{{ row.date }}</a></td>
-          <td>{{ row.character }}</td>
-          <td>{{ row.ascension }}</td>
-          <td class="{{ row.result|lower }}">{{ row.result }}</td>
-          <td>{{ row.killed_by }}</td>
-          <td>{{ row.build }}</td>
-          <td>{{ row.floors_climbed }}</td>
-          <td>{{ row.seed }}</td>
-        </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-{% endif %}
+  {% if rows %}
+    <table class="stats">
+      <thead>
+        <tr>{% for column in columns %}<th>{{ column }}</th>{% endfor %}</tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+          <tr>
+            <td><a href="{{ url_for('run_detail', username=user.username, run_id=row.run_id) }}">{{ row.date }}</a></td>
+            <td>{{ row.character }}{% if row.is_modded %} <span class="note">(modded)</span>{% endif %}</td>
+            <td>{{ row.ascension }}</td>
+            <td class="{{ row.result|lower }}">{{ row.result }}</td>
+            <td>{{ row.killed_by }}</td>
+            <td>{{ row.build }}</td>
+            <td>{{ row.floors_climbed }}</td>
+            <td>{{ row.seed }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <section class="card">
+      <h2>Nothing here</h2>
+      <p>No runs match. <a href="{{ url_for('upload') }}">Upload your save files</a>
+        if you have not yet.</p>
+    </section>
+  {% endif %}
 {% endblock %}
