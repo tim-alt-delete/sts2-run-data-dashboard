@@ -20,6 +20,7 @@ CHARACTER_COLUMNS = [
     "runs",
     "wins",
     "losses",
+    "abandoned",
     "win_rate",
     "best_streak",
     "current_streak",
@@ -98,8 +99,12 @@ def total_runs(progress: dict) -> int:
     )
 
 
-def totals(progress: dict) -> dict:
-    """Headline numbers for the top of the dashboard."""
+def lifetime_totals(progress: dict) -> dict:
+    """Headline numbers straight from progress.save.
+
+    These cover every run the game has ever recorded, including ones it has
+    since pruned from its history, so they can exceed what has been uploaded.
+    """
     wins = sum(c.get("total_wins", 0) for c in progress.get("character_stats", []))
     losses = sum(c.get("total_losses", 0) for c in progress.get("character_stats", []))
     return {
@@ -110,63 +115,6 @@ def totals(progress: dict) -> dict:
         "playtime": duration(progress.get("total_playtime", 0)),
         "floors_climbed": progress.get("floors_climbed", 0),
     }
-
-
-def character_table(progress: dict) -> pd.DataFrame:
-    """Win/loss per character, from character_stats."""
-    rows = []
-    for c in progress.get("character_stats", []):
-        wins = c.get("total_wins", 0)
-        losses = c.get("total_losses", 0)
-        rows.append(
-            {
-                "character": entry(c.get("id")),
-                "runs": wins + losses,
-                "wins": wins,
-                "losses": losses,
-                "win_rate": percent(wins, wins + losses),
-                "best_streak": c.get("best_win_streak", 0),
-                "current_streak": c.get("current_streak", 0),
-                "max_ascension": c.get("max_ascension", 0),
-                "fastest_win": duration(c.get("fastest_win_time", -1)),
-                "playtime": duration(c.get("playtime", 0)),
-            }
-        )
-
-    table = pd.DataFrame(rows, columns=CHARACTER_COLUMNS)
-    return table.sort_values("runs", ascending=False, ignore_index=True)
-
-
-def card_table(progress: dict, min_runs: int = 5) -> pd.DataFrame:
-    """Win rate per card, from card_stats.
-
-    min_runs floors the sample size. Without it a card seen in a single winning
-    run reads 100% and sorts to the top, which makes the table useless.
-    """
-    rows = []
-    for c in progress.get("card_stats", []):
-        wins = c.get("times_won", 0)
-        losses = c.get("times_lost", 0)
-        picked = c.get("times_picked", 0)
-        skipped = c.get("times_skipped", 0)
-        rows.append(
-            {
-                "card": entry(c.get("id")),
-                "runs": wins + losses,
-                "wins": wins,
-                "losses": losses,
-                "win_rate": percent(wins, wins + losses),
-                "picked": picked,
-                "skipped": skipped,
-                "pick_rate": percent(picked, picked + skipped),
-            }
-        )
-
-    table = pd.DataFrame(rows, columns=CARD_COLUMNS)
-    table = table[table["runs"] >= min_runs]
-    return table.sort_values(
-        "win_rate", ascending=False, na_position="last", ignore_index=True
-    )
 
 
 def run_result(run: dict) -> str:
@@ -464,3 +412,156 @@ def data_loss_report(progress: dict, uploaded: int) -> dict:
         "uploaded": uploaded,
         "missing": max(0, recorded - uploaded),
     }
+
+
+# --------------------------------------------------------------------------
+# aggregates derived from runs
+#
+# These reimplement what the game does in ProgressSaveManager.UpdateWithRunData,
+# so the numbers match progress.save while also covering things it never
+# records, such as relics. Runs are the authoritative source; progress.save is
+# only kept for lifetime totals that include runs the game has already pruned.
+# --------------------------------------------------------------------------
+
+
+def in_play_order(runs: list[dict]) -> list[dict]:
+    """Chronological. Streaks and ascension unlocks depend on the order."""
+    return sorted(runs, key=lambda r: r.get("start_time", 0))
+
+
+def run_floors(run: dict) -> int:
+    return sum(len(act) for act in run.get("map_point_history", []))
+
+
+def totals(runs: list[dict]) -> dict:
+    """Headline numbers over uploaded runs.
+
+    Abandoned runs are counted separately here, though the game folds them into
+    losses. win_rate is still over every run, so it matches progress.save.
+    """
+    wins = sum(1 for r in runs if run_result(r) == "Win")
+    abandoned = sum(1 for r in runs if run_result(r) == "Abandoned")
+    losses = len(runs) - wins - abandoned
+    return {
+        "runs": len(runs),
+        "wins": wins,
+        "losses": losses,
+        "abandoned": abandoned,
+        "win_rate": percent(wins, len(runs)),
+        "playtime": duration(sum(r.get("run_time", 0) for r in runs)),
+        "floors_climbed": sum(run_floors(r) for r in runs),
+    }
+
+
+def character_table(runs: list[dict]) -> pd.DataFrame:
+    """Win and loss per character, rebuilt from runs.
+
+    Streaks, fastest win and the ascension ladder are all replayed in play
+    order, matching how the game accumulates them run by run.
+    """
+    stats: dict[str, dict] = {}
+
+    for run in in_play_order(runs):
+        player = (run.get("players") or [{}])[0]
+        name = entry(player.get("character"))
+        s = stats.setdefault(
+            name,
+            {
+                "character": name, "runs": 0, "wins": 0, "losses": 0,
+                "abandoned": 0, "streak": 0, "best_streak": 0,
+                "max_ascension": 0, "fastest": None, "playtime": 0,
+            },
+        )
+
+        result = run_result(run)
+        run_time = run.get("run_time", 0)
+        s["runs"] += 1
+        s["playtime"] += run_time
+
+        if result == "Win":
+            s["wins"] += 1
+            s["streak"] += 1
+            s["best_streak"] = max(s["best_streak"], s["streak"])
+            if s["fastest"] is None or run_time < s["fastest"]:
+                s["fastest"] = run_time
+            # The next ascension unlocks only by winning at the current one,
+            # and the ladder stops at 10.
+            if run.get("ascension", 0) == s["max_ascension"] < 10:
+                s["max_ascension"] += 1
+        else:
+            # A loss and an abandon both end a streak.
+            s[("abandoned" if result == "Abandoned" else "losses")] += 1
+            s["streak"] = 0
+
+    rows = [
+        {
+            "character": s["character"],
+            "runs": s["runs"],
+            "wins": s["wins"],
+            "losses": s["losses"],
+            "abandoned": s["abandoned"],
+            "win_rate": percent(s["wins"], s["runs"]),
+            "best_streak": s["best_streak"],
+            "current_streak": s["streak"],
+            "max_ascension": s["max_ascension"],
+            "fastest_win": duration(s["fastest"]) if s["fastest"] is not None else None,
+            "playtime": duration(s["playtime"]),
+        }
+        for s in stats.values()
+    ]
+
+    table = pd.DataFrame(rows, columns=CHARACTER_COLUMNS)
+    return table.sort_values("runs", ascending=False, ignore_index=True)
+
+
+def card_table(runs: list[dict], min_runs: int = 5) -> pd.DataFrame:
+    """Win rate and pick rate per card, rebuilt from runs.
+
+    A card counts as won or lost once per run it *ended* in the deck, matching
+    the game: picking a card and removing it later counts for nothing. Pick and
+    skip are counted per reward screen instead.
+
+    min_runs floors the sample size. Without it a card seen in a single winning
+    run reads 100% and sorts to the top, which makes the table useless.
+    """
+    won: Counter = Counter()
+    lost: Counter = Counter()
+    picked: Counter = Counter()
+    skipped: Counter = Counter()
+
+    for run in runs:
+        player = (run.get("players") or [{}])[0]
+        # Distinct ids: two copies of Strike in the deck is still one run.
+        for card_id in {c.get("id") for c in player.get("deck") or []}:
+            (won if run_result(run) == "Win" else lost)[card_id] += 1
+
+        for act in run.get("map_point_history", []):
+            for point in act:
+                for stats in point.get("player_stats") or []:
+                    for choice in stats.get("card_choices") or []:
+                        card_id = (choice.get("card") or {}).get("id")
+                        target = picked if choice.get("was_picked") else skipped
+                        target[card_id] += 1
+
+    rows = []
+    for card_id in set(won) | set(lost) | set(picked) | set(skipped):
+        wins, losses = won[card_id], lost[card_id]
+        offers, skips = picked[card_id], skipped[card_id]
+        rows.append(
+            {
+                "card": humanize(entry(card_id)),
+                "runs": wins + losses,
+                "wins": wins,
+                "losses": losses,
+                "win_rate": percent(wins, wins + losses),
+                "picked": offers,
+                "skipped": skips,
+                "pick_rate": percent(offers, offers + skips),
+            }
+        )
+
+    table = pd.DataFrame(rows, columns=CARD_COLUMNS)
+    table = table[table["runs"] >= min_runs]
+    return table.sort_values(
+        ["win_rate", "runs"], ascending=False, na_position="last", ignore_index=True
+    )

@@ -248,23 +248,29 @@ migration gap and prompted the startup schema check (see below).
 
 Modded runs are hidden by default, with filters to isolate or combine them.
 
-### Phase 4 — overview statistics (next)
+### Phase 4 — overview statistics (done, `dd6cb17`)
 
-Reimplement `totals`, `character_table` and `card_table` over **uploaded runs**
-rather than `progress.save`, using the verified formulas above.
+`totals`, `character_table` and `card_table` are rebuilt from **uploaded runs**
+using the formulas above, replaying them in play order so streaks and the
+ascension ladder accumulate exactly as the game does. The `progress.save`
+versions were deleted rather than kept alongside: two implementations of the
+same numbers would drift, and relic stats exist only in run files anyway.
 
-`progress.save` then powers a separate lifetime panel and the pruning gap
-("140 lifetime runs, 100 with detail files"), via
-`data_loss_report(progress, uploaded)`.
+`progress.save` now supplies only `lifetime_totals()` and the pruning gap, so
+the overview can say "your save reports 140 runs, 40 of them have no run file".
 
-Runs stay authoritative for every statistic. This is deliberate: relic stats
-exist **only** in run files (`progress.save` has no relic data at all), so the
-run-derived path has to be built regardless, and a second `progress.save`-based
-path would duplicate it for no gain.
+Verified against the real 8-run dataset: every derived figure matches what
+`progress.save` reported, including playtime to the second and the ascension
+ladder reading 1 for characters that won at Ascension 0.
 
-One test worth writing: assert the derived aggregates equal an uploaded
-`progress.save` when nothing was pruned. That locks in the manual validation
-permanently.
+`check_derived_matches_progress` pins this down permanently: it builds runs and
+the `progress.save` the game would have written for them, and asserts the two
+agree field by field, including that abandons fold into losses on the
+`progress.save` side only.
+
+Known ceiling: the overview loads every run's JSON on each request to rebuild
+the aggregates. Fine for hundreds of runs, wasteful for many thousands. Cache
+or precompute when that matters.
 
 ---
 
@@ -294,16 +300,19 @@ either go away or become a "migrations pending" check.
 
 Every present use is "build a DataFrame from a list of dicts, sort it, render
 HTML": `run_path_table`, `deck_table`, `relic_table`, `character_table`,
-`card_table`, plus `pd.isna` in two assertions. `collections.Counter` and a
-Jinja loop would cover all of it, and `.to_html()` is the reason the deck and
-relic tables cannot be styled per-cell the way the runs table is.
+`card_table`, plus `pd.isna` in assertions. `collections.Counter` and a Jinja
+loop would cover all of it, and `.to_html()` is the reason the deck, relic,
+character and card tables cannot be styled per-cell the way the runs table is.
+
+Phase 4 did not change this. The aggregation itself is `Counter` and plain
+dict work; pandas only formats the result at the end.
 
 It stays because the actual analytical work ahead — relic and card cross-tabs,
 deck clustering, exporting a training set — is real DataFrame work. Phase 4's
 aggregates are `Counter`-shaped either way, so this blocks nothing.
 
-Revisit if: pandas is still only formatting tables after phase 4, or a page
-needs per-cell styling that `.to_html()` cannot express. Removing it would drop
+Revisit if: a page needs per-cell styling that `.to_html()` cannot express, for
+instance colouring win rates the way the runs table colours results. Removing it would drop
 a large dependency; keeping it costs nothing but import time.
 
 ### Deployment
@@ -338,9 +347,10 @@ accounts.
   identity configured in the sandbox, so it is passed per-commit via
   `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` env vars.
 - **Tests**: `python test_dashboard.py`, no pytest, no fixtures framework.
-  Every check prints `name ok`. Current checks: parsing, progress tables, auth,
-  privacy, csrf, secret key, upload, upload form, upload folder, upload modded,
-  upload privacy, run pages, run pages mod, run pages priv.
+  Every check prints `name ok`. Current checks: parsing, lifetime totals,
+  derived stats, card stats, derived==progress, auth, privacy, csrf, secret
+  key, upload, upload form, upload folder, upload modded, upload privacy, run
+  pages, overview page, run pages mod, run pages priv.
 - **Verification**: changes are checked against the 8 real archived runs, not
   only fixtures. Several real bugs were caught that way.
 - **Phases**: built one at a time, each verified, committed and pushed, with a

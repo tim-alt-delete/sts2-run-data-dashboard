@@ -4,28 +4,77 @@
 {% block content %}
   <h1>{{ user.username }}</h1>
 
-  {% if run_count or modded_count %}
+  {% if totals.runs or modded_count %}
+    <form method="get">
+      <label>Save tree
+        <select name="tree" onchange="this.form.submit()">
+          {% for value, caption in [("vanilla", "Vanilla"), ("modded", "Modded"), ("all", "Both")] %}
+            <option value="{{ value }}" {% if value == tree %}selected{% endif %}>{{ caption }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Min runs per card
+        <input type="number" name="min_runs" value="{{ min_runs }}" min="0" style="width: 4rem">
+      </label>
+      <button type="submit">Apply</button>
+    </form>
+  {% endif %}
+
+  {% if totals.runs %}
     <p class="totals">
-      <strong>{{ run_count }}</strong> run{{ '' if run_count == 1 else 's' }}
-      {%- if modded_count %} &middot;
-        <span class="note">{{ modded_count }} modded, kept separate</span>
-      {%- endif %}
+      <strong>{{ totals.runs }}</strong> runs &middot;
+      <strong class="win">{{ totals.wins }}</strong> wins &middot;
+      <strong class="loss">{{ totals.losses }}</strong> losses
+      {%- if totals.abandoned %} &middot;
+        <strong class="abandoned">{{ totals.abandoned }}</strong> abandoned
+      {%- endif %} &middot;
+      <strong>{{ totals.win_rate if totals.win_rate is not none else '-' }}%</strong> win rate &middot;
+      {{ totals.playtime }} played &middot;
+      {{ totals.floors_climbed }} floors climbed
     </p>
 
     <p class="note">
-      <a href="{{ url_for('user_runs', username=user.username) }}">Run history →</a>
+      <a href="{{ url_for('user_runs', username=user.username, tree=tree) }}">Run history →</a>
       &middot; <a href="{{ url_for('upload') }}">Upload more</a>
+      {%- if modded_count and tree == 'vanilla' %} &middot;
+        {{ modded_count }} modded run{{ '' if modded_count == 1 else 's' }} kept separate
+      {%- endif %}
     </p>
 
-    <section class="card">
-      <h2>Stats are coming next</h2>
-      <p>Your runs are browsable now. The character and card breakdowns built
-        from them land in the next change.</p>
-    </section>
+    {% if lifetime %}
+      <p class="note">
+        Your save file reports <strong>{{ lifetime.runs }}</strong> runs
+        ({{ lifetime.wins }}W / {{ lifetime.losses }}L) over {{ lifetime.playtime }}.
+        {%- if loss.missing %}
+          <span class="warn">{{ loss.missing }} of those have no run file, so they
+          are missing from the tables below.</span>
+          The game only keeps its last 100 runs.
+        {%- else %}
+          Every one of them has been uploaded.
+        {%- endif %}
+      </p>
+    {% else %}
+      <p class="note">Upload <code>progress.save</code> too and this will show your
+        lifetime totals, including runs the game has already deleted.</p>
+    {% endif %}
+
+    <h2>By character</h2>
+    {{ characters|safe }}
+
+    <h2>By card <span class="note">(at least {{ min_runs }} runs in the final deck)</span></h2>
+    {{ cards|safe }}
+
+    <p class="note">A card counts for a run only if it was still in the deck at the
+      end, which is how the game counts it too. Picked and skipped come from reward
+      screens instead.</p>
   {% else %}
     <section class="card">
       <h2>No runs yet</h2>
       <p><a href="{{ url_for('upload') }}">Upload your save files</a> to get started.</p>
+      {% if modded_count %}
+        <p class="note">You have {{ modded_count }} modded run{{ '' if modded_count == 1 else 's' }}.
+          Switch the save tree above to see them.</p>
+      {% endif %}
     </section>
   {% endif %}
 {% endblock %}

@@ -209,17 +209,50 @@ def register_user_routes(app: Flask) -> None:
     @login_required
     def overview(username: str):
         user = owned(username)
+        tree = request.args.get("tree", "vanilla")
+        min_runs = request.args.get("min_runs", default=5, type=int)
+
         counts = db.session.execute(
             db.select(Run.is_modded, db.func.count())
             .filter_by(user_id=user.id)
             .group_by(Run.is_modded)
         ).all()
         by_tree = {modded: n for modded, n in counts}
+
+        # Every statistic is rebuilt from the run files on each request. That
+        # means loading each run's JSON, which is fine for hundreds of runs and
+        # wasteful for many thousands. Cache or precompute when that day comes.
+        runs = list(
+            db.session.scalars(
+                tree_filter(db.select(Run).filter_by(user_id=user.id), tree)
+            )
+        )
+        data = [r.data for r in runs]
+
+        # progress.save covers runs the game has since pruned, so its totals can
+        # exceed what was uploaded. That gap is the point of showing it.
+        snapshot = db.session.scalar(
+            db.select(ProgressSnapshot).filter_by(
+                user_id=user.id, is_modded=(tree == "modded")
+            )
+        )
+        lifetime = sts2data.lifetime_totals(snapshot.data) if snapshot else None
+        loss = (
+            sts2data.data_loss_report(snapshot.data, len(data)) if snapshot else None
+        )
+
         return render_template(
             "overview.html",
             user=user,
+            tree=tree,
+            min_runs=min_runs,
             run_count=by_tree.get(False, 0),
             modded_count=by_tree.get(True, 0),
+            totals=sts2data.totals(data),
+            lifetime=lifetime,
+            loss=loss,
+            characters=sts2data.character_table(data).to_html(**TABLE_OPTIONS),
+            cards=sts2data.card_table(data, min_runs).to_html(**TABLE_OPTIONS),
         )
 
     @app.route("/u/<username>/runs")

@@ -228,37 +228,179 @@ def check_parsing() -> None:
     print("parsing         ok")
 
 
-def check_progress_tables() -> None:
-    """progress.save aggregates. Runs take over from these in the next change,
-    but the lifetime panel still reads them."""
+def check_lifetime_totals() -> None:
+    """progress.save now only supplies lifetime figures and the pruning gap."""
     progress = VANILLA_PROGRESS
 
-    assert sts2data.totals(progress) == {
+    assert sts2data.lifetime_totals(progress) == {
         "runs": 15, "wins": 3, "losses": 12, "win_rate": 20.0,
         "playtime": "12:34:56", "floors_climbed": 611,
     }
 
-    characters = sts2data.character_table(progress)
-    assert list(characters["character"]) == ["IRONCLAD", "SILENT", "DEFECT"], "sorted by runs"
-    assert characters.loc[0, "win_rate"] == 30.0
-    assert characters.loc[0, "fastest_win"] == "1:02:05", "fastest_win_time is seconds"
-    assert pd.isna(characters.loc[1, "fastest_win"]), "-1 means no win yet"
-    assert pd.isna(characters.loc[2, "win_rate"]), "zero runs must not divide by zero"
-
-    cards = sts2data.card_table(progress, min_runs=5)
-    assert list(cards["card"]) == ["OFFERING", "STRIKE"], list(cards["card"])
-    assert "LUCKY_ONCE" not in list(cards["card"]), "1-run card must be filtered"
-    assert cards.loc[0, "win_rate"] == 50.0 and cards.loc[0, "pick_rate"] == 90.0
-    assert sts2data.card_table(progress, min_runs=0).shape[0] == 4, "absent keys default to 0"
-
-    # the gap between lifetime totals and what has actually been uploaded
     assert sts2data.data_loss_report(progress, uploaded=3) == {
         "recorded": 15, "uploaded": 3, "missing": 12,
     }
     assert sts2data.data_loss_report(progress, uploaded=99)["missing"] == 0, \
         "more uploads than the game recorded is not negative loss"
 
-    print("progress tables ok")
+    print("lifetime totals ok")
+
+
+def make_run(start_time, character, *, win=False, abandoned=False, ascension=0,
+             run_time=1000, floors=2, deck=(), choices=()):
+    """A run file with only what the aggregates read."""
+    return {
+        "start_time": start_time, "win": win, "was_abandoned": abandoned,
+        "ascension": ascension, "run_time": run_time, "seed": "SEED",
+        "build_id": "v0.107.1", "killed_by_encounter": "NONE.NONE",
+        "killed_by_event": "NONE.NONE", "acts": ["ACT.OVERGROWTH"],
+        "players": [{"character": f"CHARACTER.{character}",
+                     "deck": [{"id": c} for c in deck]}],
+        "map_point_history": [[
+            {"map_point_type": "monster", "rooms": [{"room_type": "monster"}],
+             "player_stats": [{"card_choices": [
+                 {"card": {"id": cid}, "was_picked": picked}
+                 for cid, picked in choices]}]},
+        ] + [{"map_point_type": "monster", "rooms": [{"room_type": "monster"}],
+              "player_stats": [{}]} for _ in range(floors - 1)]],
+    }
+
+
+def check_derived_aggregates() -> None:
+    """Statistics rebuilt from runs, replaying what the game does per run."""
+    runs = [
+        make_run(1000, "IRONCLAD", win=True, ascension=0, run_time=3600, floors=48),
+        make_run(2000, "IRONCLAD", win=True, ascension=1, run_time=1800, floors=48),
+        make_run(3000, "IRONCLAD", run_time=600, floors=12),
+        make_run(4000, "IRONCLAD", win=True, ascension=2, run_time=2400, floors=48),
+        make_run(5000, "SILENT", abandoned=True, run_time=300, floors=3),
+    ]
+
+    assert sts2data.totals(runs) == {
+        "runs": 5, "wins": 3, "losses": 1, "abandoned": 1,
+        "win_rate": 60.0, "playtime": "2:25:00",
+        "floors_climbed": 159,
+    }
+
+    table = sts2data.character_table(runs).set_index("character")
+    iron = table.loc["IRONCLAD"]
+    assert (iron["runs"], iron["wins"], iron["losses"], iron["abandoned"]) == (4, 3, 1, 0)
+    assert iron["win_rate"] == 75.0
+    assert iron["best_streak"] == 2, "two wins, then a loss, then one more"
+    assert iron["current_streak"] == 1, "the last run was a win"
+    assert iron["max_ascension"] == 3, \
+        "each win at the current ascension unlocks the next"
+    assert iron["fastest_win"] == "0:30:00", "the quickest win, not the quickest run"
+    assert iron["playtime"] == "2:20:00"
+
+    silent = table.loc["SILENT"]
+    assert (silent["wins"], silent["losses"], silent["abandoned"]) == (0, 0, 1)
+    assert silent["max_ascension"] == 0 and pd.isna(silent["fastest_win"])
+    assert silent["current_streak"] == 0, "an abandon ends a streak like a loss"
+
+    # a win only unlocks the next ascension when played at the current maximum
+    skipped = [make_run(1000, "DEFECT", win=True, ascension=5)]
+    assert sts2data.character_table(skipped).loc[0, "max_ascension"] == 0, \
+        "winning above your unlocked level does not advance the ladder"
+
+    assert sts2data.character_table([]).empty
+    assert sts2data.totals([])["win_rate"] is None, "no runs must not divide by zero"
+
+    print("derived stats   ok")
+
+
+def check_card_stats() -> None:
+    """Cards count per run they ended in, and per reward screen for pick rate."""
+    runs = [
+        make_run(1000, "IRONCLAD", win=True,
+                 deck=["CARD.STRIKE", "CARD.STRIKE", "CARD.PYRE"],
+                 choices=[("CARD.PYRE", True), ("CARD.TREMBLE", False)]),
+        make_run(2000, "IRONCLAD",
+                 deck=["CARD.STRIKE", "CARD.TREMBLE"],
+                 choices=[("CARD.TREMBLE", True), ("CARD.PYRE", False)]),
+    ]
+
+    cards = sts2data.card_table(runs, min_runs=0).set_index("card")
+
+    strike = cards.loc["Strike"]
+    assert (strike["runs"], strike["wins"], strike["losses"]) == (2, 1, 1), \
+        "two copies in one deck is still one run"
+    assert strike["win_rate"] == 50.0
+    assert pd.isna(strike["pick_rate"]), "a starting card is never offered"
+
+    pyre = cards.loc["Pyre"]
+    assert (pyre["wins"], pyre["losses"]) == (1, 0)
+    assert (pyre["picked"], pyre["skipped"]) == (1, 1) and pyre["pick_rate"] == 50.0
+
+    tremble = cards.loc["Tremble"]
+    assert (tremble["wins"], tremble["losses"]) == (0, 1), \
+        "picked in the losing run, skipped in the winning one"
+
+    # sample-size floor
+    assert set(sts2data.card_table(runs, min_runs=2)["card"]) == {"Strike"}
+    assert sts2data.card_table(runs, min_runs=99).empty
+    assert sts2data.card_table([]).empty
+
+    print("card stats      ok")
+
+
+def check_derived_matches_progress() -> None:
+    """The whole premise: runs reproduce progress.save when nothing was pruned.
+
+    This is the manual cross-check that was done by hand against real data,
+    pinned down so a change to either side cannot quietly break it.
+    """
+    runs = [
+        make_run(1000, "IRONCLAD", win=True, ascension=0, run_time=3600, floors=48),
+        make_run(2000, "IRONCLAD", run_time=1200, floors=30),
+        make_run(3000, "SILENT", run_time=900, floors=20),
+        make_run(4000, "SILENT", abandoned=True, run_time=300, floors=5),
+    ]
+
+    # what the game would have written after exactly these runs
+    progress = {
+        "total_playtime": 3600 + 1200 + 900 + 300,
+        "floors_climbed": 48 + 30 + 20 + 5,
+        "character_stats": [
+            {"id": "CHARACTER.IRONCLAD", "total_wins": 1, "total_losses": 1,
+             "max_ascension": 1, "fastest_win_time": 3600, "best_win_streak": 1,
+             "current_streak": 0, "playtime": 4800},
+            # the game folds abandons into losses
+            {"id": "CHARACTER.SILENT", "total_wins": 0, "total_losses": 2,
+             "max_ascension": 0, "fastest_win_time": -1, "best_win_streak": 0,
+             "current_streak": 0, "playtime": 1200},
+        ],
+        "card_stats": [],
+    }
+
+    derived = sts2data.totals(runs)
+    lifetime = sts2data.lifetime_totals(progress)
+    assert derived["runs"] == lifetime["runs"] == 4
+    assert derived["wins"] == lifetime["wins"] == 1
+    assert derived["losses"] + derived["abandoned"] == lifetime["losses"] == 3, \
+        "progress.save counts abandons as losses; runs keep them apart"
+    assert derived["playtime"] == lifetime["playtime"]
+    assert derived["floors_climbed"] == lifetime["floors_climbed"]
+
+    table = sts2data.character_table(runs).set_index("character")
+    for entry in progress["character_stats"]:
+        name = entry["id"].split(".")[-1]
+        row = table.loc[name]
+        assert row["wins"] == entry["total_wins"], name
+        assert row["losses"] + row["abandoned"] == entry["total_losses"], name
+        assert row["max_ascension"] == entry["max_ascension"], name
+        assert row["best_streak"] == entry["best_win_streak"], name
+        assert row["current_streak"] == entry["current_streak"], name
+        assert row["playtime"] == sts2data.duration(entry["playtime"]), name
+        expected = entry["fastest_win_time"]
+        if expected < 0:
+            assert pd.isna(row["fastest_win"]), name
+        else:
+            assert row["fastest_win"] == sts2data.duration(expected), name
+
+    assert sts2data.data_loss_report(progress, uploaded=len(runs))["missing"] == 0
+
+    print("derived==progress ok")
 
 
 def upload_runs(client, names=None, modded=False):
@@ -311,6 +453,42 @@ def check_run_pages() -> None:
     print("run pages       ok")
 
 
+def check_overview_page() -> None:
+    _app, client = make_client("tim")
+    upload_runs(client)
+
+    body = client.get("/u/tim").get_data(as_text=True)
+    text = text_of(body)
+    # the fixtures are one win, one loss and one abandon
+    assert "3 runs" in text and "1 wins" in text and "1 losses" in text
+    assert "1 abandoned" in text
+    assert "33.3% win rate" in text
+    assert "IRONCLAD" in body and "SILENT" in body and "DEFECT" in body
+
+    # no progress.save uploaded yet, so the lifetime panel invites one
+    assert "lifetime totals" in text
+
+    # card table honours the sample-size floor
+    assert "Strike Ironclad" not in body, "a one-run card is below the default floor of 5"
+    loose = client.get("/u/tim?min_runs=1").get_data(as_text=True)
+    assert "Strike Ironclad" in loose
+    assert "Setup Strike" not in loose, \
+        "picked but never in a final deck, so it counts for no runs"
+    assert "Setup Strike" in client.get("/u/tim?min_runs=0").get_data(as_text=True)
+
+    # uploading progress.save fills in the lifetime panel and the pruning gap
+    client.post(
+        "/upload",
+        data={"files": [(io.BytesIO(json.dumps(VANILLA_PROGRESS).encode()), "progress.save")]},
+        content_type="multipart/form-data",
+    )
+    text = text_of(client.get("/u/tim").get_data(as_text=True))
+    assert "reports 15 runs" in text, text[:400]
+    assert "12 of those have no run file" in text, "15 recorded, 3 uploaded"
+
+    print("overview page   ok")
+
+
 def check_run_pages_modded() -> None:
     """Modded runs stay out of the way unless asked for."""
     _app, client = make_client("tim")
@@ -330,7 +508,7 @@ def check_run_pages_modded() -> None:
 
     # the overview counts them separately
     overview = client.get("/u/tim").get_data(as_text=True)
-    assert "1 modded, kept separate" in re.sub(r"<[^>]+>|\s+", " ", overview)
+    assert "1 modded run kept separate" in text_of(overview)
 
     print("run pages mod   ok")
 
@@ -352,6 +530,15 @@ def check_run_pages_privacy() -> None:
         assert r.status_code == 302 and r.headers["Location"].startswith("/?next="), path
 
     print("run pages priv  ok")
+
+
+def text_of(html: str) -> str:
+    """Visible text with runs of whitespace collapsed.
+
+    Tags have to go before whitespace is collapsed, or removing a tag between
+    two words leaves a double space and breaks naive substring checks.
+    """
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", html)).strip()
 
 
 def table_html(body: str) -> str:
@@ -541,8 +728,7 @@ def check_upload_folder() -> None:
             db.select(Run).filter_by(start_time=1789999999)
         ), "current_run.save is an unfinished run and must never be stored"
 
-    summary = re.search(r'<p class="totals">(.*?)</p>', body, re.S).group(1)
-    summary = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", summary)).strip()
+    summary = text_of(re.search(r'<p class="totals">(.*?)</p>', body, re.S).group(1))
     # 9 files in: one finished run, one progress.save, and seven to ignore.
     assert "1 added" in summary, summary
     assert "1 progress file" in summary, summary
@@ -699,7 +885,10 @@ def check_upload_privacy() -> None:
 
 def main() -> None:
     check_parsing()
-    check_progress_tables()
+    check_lifetime_totals()
+    check_derived_aggregates()
+    check_card_stats()
+    check_derived_matches_progress()
     check_auth()
     check_privacy()
     check_csrf()
@@ -710,6 +899,7 @@ def main() -> None:
     check_upload_modded()
     check_upload_privacy()
     check_run_pages()
+    check_overview_page()
     check_run_pages_modded()
     check_run_pages_privacy()
     print("\nall checks passed")
