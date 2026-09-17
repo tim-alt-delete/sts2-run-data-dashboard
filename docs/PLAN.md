@@ -248,7 +248,7 @@ migration gap and prompted the startup schema check (see below).
 
 Modded runs are hidden by default, with filters to isolate or combine them.
 
-### Phase 4 — overview statistics (done, `dd6cb17`)
+### Phase 4 — overview statistics (done, `7da6488`)
 
 `totals`, `character_table` and `card_table` are rebuilt from **uploaded runs**
 using the formulas above, replaying them in play order so streaks and the
