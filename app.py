@@ -29,7 +29,16 @@ from flask_wtf.csrf import CSRFProtect
 
 import config as app_config
 import sts2data
-from models import User, db, normalize_username, password_error, username_error
+import uploads
+from models import (
+    ProgressSnapshot,
+    Run,
+    User,
+    db,
+    normalize_username,
+)
+from models import now as models_now
+from models import password_error, username_error
 
 TABLE_OPTIONS = {"index": False, "na_rep": "-", "classes": "stats", "border": 0}
 
@@ -162,7 +171,108 @@ def register_user_routes(app: Flask) -> None:
         # anything that is not yours looks the same as a name nobody has taken.
         if normalize_username(username) != current_user.username:
             abort(404)
-        return render_template("overview.html", user=current_user)
+
+        counts = db.session.execute(
+            db.select(Run.result, db.func.count())
+            .filter_by(user_id=current_user.id, is_modded=False)
+            .group_by(Run.result)
+        ).all()
+        return render_template(
+            "overview.html",
+            user=current_user,
+            run_count=sum(n for _, n in counts),
+            modded_count=db.session.scalar(
+                db.select(db.func.count())
+                .select_from(Run)
+                .filter_by(user_id=current_user.id, is_modded=True)
+            ),
+        )
+
+    @app.route("/upload", methods=["GET", "POST"])
+    @login_required
+    def upload():
+        if request.method == "GET":
+            return render_template("upload.html")
+
+        files = [f for f in request.files.getlist("files") if f and f.filename]
+        if not files:
+            flash("Choose at least one file.", "error")
+            return render_template("upload.html"), 400
+        if len(files) > uploads.MAX_FILES:
+            flash(
+                f"That is {len(files)} files. Upload at most {uploads.MAX_FILES} at once.",
+                "error",
+            )
+            return render_template("upload.html"), 400
+
+        force_modded = bool(request.form.get("modded"))
+        results = ingest(files, current_user, force_modded)
+        return render_template("upload.html", results=results), 200
+
+
+def ingest(files, user, force_modded: bool) -> dict:
+    """Validate and store an upload, reporting what happened to each file."""
+    existing = set(
+        db.session.scalars(
+            db.select(Run.start_time).filter_by(user_id=user.id)
+        ).all()
+    )
+    rows, added, duplicate, rejected, progress_saved = [], 0, 0, 0, 0
+
+    for storage in files:
+        parsed = uploads.parse_file(storage, force_modded=force_modded)
+
+        if not parsed.ok:
+            rejected += 1
+            rows.append((parsed.filename, "rejected", parsed.error))
+            continue
+
+        if parsed.kind == uploads.PROGRESS_KIND:
+            snapshot = db.session.scalar(
+                db.select(ProgressSnapshot).filter_by(
+                    user_id=user.id, is_modded=parsed.is_modded
+                )
+            )
+            if snapshot is None:
+                snapshot = ProgressSnapshot(user_id=user.id, is_modded=parsed.is_modded)
+                db.session.add(snapshot)
+            snapshot.data = parsed.data
+            snapshot.uploaded_at = models_now()
+            progress_saved += 1
+            tree = "modded" if parsed.is_modded else "vanilla"
+            rows.append((parsed.filename, "stored", f"lifetime totals ({tree})"))
+            continue
+
+        start_time = parsed.metadata["start_time"]
+        # Covers both a re-upload and the same run appearing twice in one batch.
+        if start_time in existing:
+            duplicate += 1
+            rows.append((parsed.filename, "duplicate", "already uploaded"))
+            continue
+
+        existing.add(start_time)
+        db.session.add(
+            Run(
+                user_id=user.id,
+                is_modded=parsed.is_modded,
+                data=parsed.data,
+                **parsed.metadata,
+            )
+        )
+        added += 1
+        detail = f"{parsed.metadata['character']} {parsed.metadata['result']}"
+        if parsed.is_modded:
+            detail += " (modded)"
+        rows.append((parsed.filename, "added", detail))
+
+    db.session.commit()
+    return {
+        "rows": rows,
+        "added": added,
+        "duplicate": duplicate,
+        "rejected": rejected,
+        "progress": progress_saved,
+    }
 
 
 # --------------------------------------------------------------------------

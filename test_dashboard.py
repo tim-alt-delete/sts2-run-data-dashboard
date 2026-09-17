@@ -10,6 +10,7 @@ Fixture key names are taken from the decompiled game source:
 SerializableProgress.cs, CharacterStats.cs, CardStats.cs, UserDataPathProvider.cs
 """
 
+import io
 import json
 import os
 import re
@@ -22,8 +23,9 @@ import pandas as pd
 
 import app as dashboard
 import sts2data
+import uploads
 from config import TestConfig
-from models import User, db
+from models import ProgressSnapshot, Run, User, db
 
 PASSWORD = "correct-horse-battery"
 
@@ -441,6 +443,140 @@ def check_secret_key() -> None:
     print("secret key      ok")
 
 
+def check_upload() -> None:
+    app, client = make_client("tim")
+
+    def send(files, modded=False):
+        data = {"files": [(io.BytesIO(body), name) for name, body in files]}
+        if modded:
+            data["modded"] = "1"
+        return client.post("/upload", data=data, content_type="multipart/form-data")
+
+    def as_json(obj) -> bytes:
+        return json.dumps(obj).encode()
+
+    run = RUN_FILES["1789424859.run"]
+
+    # a good run is stored, with its metadata pulled out into columns
+    body = send([("1789424859.run", as_json(run))]).get_data(as_text=True)
+    assert "1 added" in re.sub(r"\s+", " ", body).replace("<strong>", "").replace("</strong>", "")
+    with app.app_context():
+        stored = db.session.scalar(db.select(Run))
+        assert stored.start_time == 1789424859
+        assert stored.character == "IRONCLAD" and stored.result == "Win"
+        assert stored.ascension == 4 and stored.seed == "3J6ZXDRGZE"
+        assert stored.build == "v0.107.1" and stored.floors == 5
+        assert stored.is_modded is False
+        assert stored.data["seed"] == "3J6ZXDRGZE", "the raw file is kept intact"
+
+    # re-uploading the same run changes nothing
+    send([("1789424859.run", as_json(run))])
+    with app.app_context():
+        assert db.session.scalar(db.select(db.func.count()).select_from(Run)) == 1
+
+    # the same run twice inside one request must not trip the unique constraint
+    send([("a.run", as_json(run)), ("b.run", as_json(run))])
+    with app.app_context():
+        assert db.session.scalar(db.select(db.func.count()).select_from(Run)) == 1
+
+    # rejections
+    for name, payload, expected in (
+        ("bad.run", b"{not json", "Not valid JSON"),
+        ("empty.run", b"   ", "File is empty"),
+        ("list.run", b"[1,2,3]", "expected a JSON object"),
+        ("nostart.run", as_json({"players": [{}], "map_point_history": []}), "start_time"),
+        ("noplayers.run", as_json({"start_time": 1789424859, "map_point_history": []}), "players"),
+        ("badhistory.run", as_json({"start_time": 1789424859, "players": [{}],
+                                    "map_point_history": "nope"}), "map_point_history"),
+        ("future.run", as_json({"start_time": 99999999999, "players": [{}],
+                                "map_point_history": []}), "plausible range"),
+        ("binary.run", b"\xff\xfe\x00\x01", "Not UTF-8"),
+    ):
+        body = send([(name, payload)]).get_data(as_text=True)
+        assert expected in body, f"{name} should report {expected!r}, got: {body[-400:]}"
+    with app.app_context():
+        assert db.session.scalar(db.select(db.func.count()).select_from(Run)) == 1, \
+            "no rejected file may reach the database"
+
+    # oversized
+    huge = as_json({"start_time": 1789424859, "players": [{}], "map_point_history": [],
+                    "pad": "x" * (uploads.MAX_RUN_BYTES)})
+    assert "limit" in send([("huge.run", huge)]).get_data(as_text=True)
+
+    # progress.save is stored separately, latest wins, and kept per save tree
+    body = send([("progress.save", as_json(VANILLA_PROGRESS))]).get_data(as_text=True)
+    assert "lifetime totals (vanilla)" in body
+    send([("progress.save", as_json(VANILLA_PROGRESS))])
+    with app.app_context():
+        assert db.session.scalar(
+            db.select(db.func.count()).select_from(ProgressSnapshot)
+        ) == 1, "re-uploading progress.save replaces it rather than piling up"
+
+    print("upload          ok")
+
+
+def check_upload_modded() -> None:
+    app, client = make_client("tim")
+
+    def send(files, modded=False):
+        data = {"files": [(io.BytesIO(json.dumps(o).encode()), n) for n, o in files]}
+        if modded:
+            data["modded"] = "1"
+        return client.post("/upload", data=data, content_type="multipart/form-data")
+
+    run = RUN_FILES["1789424859.run"]
+    other = dict(run, start_time=1789424860)
+    third = dict(run, start_time=1789424861)
+
+    # detected from the folder path a browser reports for a directory upload
+    send([("steam/765/modded/profile1/saves/history/1789424859.run", run)])
+    # the checkbox covers selecting individual files, where there is no path
+    send([("1789424860.run", other)], modded=True)
+    # a vanilla path stays vanilla
+    send([("steam/765/profile1/saves/history/1789424861.run", third)])
+
+    with app.app_context():
+        by_start = {r.start_time: r.is_modded for r in db.session.scalars(db.select(Run))}
+        assert by_start == {1789424859: True, 1789424860: True, 1789424861: False}, by_start
+
+    assert uploads.is_modded_path("a/modded/profile1/x.run") is True
+    assert uploads.is_modded_path("a/profile1/x.run") is False
+    assert uploads.is_modded_path("modded.run") is False, \
+        "a file merely named modded is not in the modded tree"
+
+    # the filename is only ever used for display and never to touch the disk
+    assert uploads.display_name("../../etc/passwd") == "passwd"
+    assert uploads.display_name("a/b/c/run.run") == "run.run"
+
+    print("upload modded   ok")
+
+
+def check_upload_privacy() -> None:
+    app, client = make_client("tim")
+    client.post(
+        "/upload",
+        data={"files": [(io.BytesIO(json.dumps(RUN_FILES["1789424859.run"]).encode()),
+                         "1789424859.run")]},
+        content_type="multipart/form-data",
+    )
+
+    # a second account must not see the first account's runs
+    _app2, other = make_client(None)
+    other.post("/register", data={"username": "someone-else", "password": PASSWORD})
+    with app.app_context():
+        pass
+    assert other.get("/u/tim").status_code == 404
+
+    _app3, anon = make_client(None)
+    r = anon.get("/upload")
+    assert r.status_code == 302 and r.headers["Location"].startswith("/?next="), \
+        "uploading must require a login"
+    r = anon.post("/upload", data={})
+    assert r.status_code == 302, "posting an upload must require a login too"
+
+    print("upload privacy  ok")
+
+
 def check_routes() -> None:
     _app, client = make_client()
     modded = sts2data.find_profiles()[1]["saves"]
@@ -529,6 +665,9 @@ def main() -> None:
             check_privacy()
             check_csrf()
             check_secret_key()
+            check_upload()
+            check_upload_modded()
+            check_upload_privacy()
             check_routes()
             check_missing_saves()
         finally:

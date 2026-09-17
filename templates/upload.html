@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Upload — Slay the Spire 2 stats{% endblock %}
+
+{% block content %}
+  <h1>Upload save files</h1>
+
+  <div class="authforms">
+    <section class="card">
+      <h2>Choose files</h2>
+      <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>Run files and progress.save
+          <input type="file" name="files" multiple accept=".run,.save,application/json">
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" name="modded" value="1">
+          These are modded runs
+        </label>
+        <p class="note">Runs from the game's <code>modded/</code> folder are detected
+          automatically when you select a whole folder. Tick the box if you are
+          selecting individual files from a modded save.</p>
+        <button type="submit">Upload</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Where are my saves?</h2>
+      <p class="note">macOS</p>
+      <code>~/Library/Application Support/SlayTheSpire2/steam/&lt;id&gt;/profile1/saves</code>
+      <p class="note">Upload the <code>history</code> folder for your runs, and
+        <code>progress.save</code> for lifetime totals. Uploading the same run twice
+        is harmless: it is matched on its start time and skipped.</p>
+      <p class="note">The game only keeps its last 100 runs, so anything older than
+        that is already gone unless you have archived it.</p>
+    </section>
+  </div>
+
+  {% if results %}
+    <h2>Result</h2>
+    <p class="totals">
+      <strong>{{ results.added }}</strong> added &middot;
+      <strong>{{ results.duplicate }}</strong> already had &middot;
+      <strong>{{ results.rejected }}</strong> rejected
+      {%- if results.progress %} &middot;
+        <strong>{{ results.progress }}</strong> progress file{{ '' if results.progress == 1 else 's' }}
+      {%- endif %}
+    </p>
+
+    <table class="stats">
+      <thead><tr><th>file</th><th>outcome</th><th>detail</th></tr></thead>
+      <tbody>
+        {% for name, outcome, detail in results.rows %}
+          <tr>
+            <td>{{ name }}</td>
+            <td class="{{ 'win' if outcome in ('added', 'stored') else ('warn' if outcome == 'rejected' else '') }}">{{ outcome }}</td>
+            <td>{{ detail }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+{% endblock %}

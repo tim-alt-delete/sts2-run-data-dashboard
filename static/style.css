@@ -88,6 +88,9 @@ button.linkish:hover { text-decoration: underline; }
 }
 .card form input:focus { outline: none; border-color: var(--accent); }
 .card form button { padding: 0.45rem 1rem; font: inherit; }
+.card form label.checkbox { display: flex; align-items: center; gap: 0.5rem; color: var(--text); }
+.card form label.checkbox input { width: auto; margin: 0; }
+.card code { display: inline-block; word-break: break-all; }
 
 h1 { margin-bottom: 0.2rem; }
 form { margin: 1rem 0; }

@@ -73,3 +73,75 @@ class User(db.Model, UserMixin):
 
     def __repr__(self) -> str:
         return f"<User {self.username}>"
+
+
+class Run(db.Model):
+    """One finished run, as uploaded.
+
+    The raw file is kept in `data` so every parser in sts2data keeps working
+    unchanged, and so nothing is lost if more columns are wanted later. The
+    other columns exist to sort and filter without opening the JSON.
+    """
+
+    __tablename__ = "runs"
+    __table_args__ = (
+        # The game names each file after its start_time, so re-uploading a save
+        # folder is a no-op rather than a pile of duplicates.
+        db.UniqueConstraint("user_id", "start_time", name="uq_runs_user_start"),
+        db.Index("ix_runs_user_start", "user_id", "start_time"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(
+        db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    start_time = db.Column(db.Integer, nullable=False)
+
+    character = db.Column(db.String(64))
+    result = db.Column(db.String(16))
+    ascension = db.Column(db.Integer)
+    seed = db.Column(db.String(32))
+    build = db.Column(db.String(32))
+    floors = db.Column(db.Integer)
+    run_time = db.Column(db.Integer)
+
+    # A .run file carries no modded flag, so this comes from the upload: either
+    # the folder path the browser reported, or the checkbox on the form.
+    is_modded = db.Column(db.Boolean, nullable=False, default=False)
+
+    data = db.Column(db.JSON, nullable=False)
+    uploaded_at = db.Column(db.DateTime, nullable=False, default=now)
+
+    user = db.relationship("User", backref=db.backref("runs", passive_deletes=True))
+
+    def __repr__(self) -> str:
+        return f"<Run {self.start_time} {self.character} {self.result}>"
+
+
+class ProgressSnapshot(db.Model):
+    """The latest progress.save for a user, kept per save tree.
+
+    Runs are authoritative for every statistic. This exists to show lifetime
+    totals, including runs the game has already pruned from its 100-file
+    history, and so the gap between the two can be reported.
+    """
+
+    __tablename__ = "progress_snapshots"
+    __table_args__ = (
+        db.UniqueConstraint("user_id", "is_modded", name="uq_progress_user_modded"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(
+        db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    is_modded = db.Column(db.Boolean, nullable=False, default=False)
+    data = db.Column(db.JSON, nullable=False)
+    uploaded_at = db.Column(db.DateTime, nullable=False, default=now)
+
+    user = db.relationship(
+        "User", backref=db.backref("progress_snapshots", passive_deletes=True)
+    )
+
+    def __repr__(self) -> str:
+        return f"<ProgressSnapshot user={self.user_id} modded={self.is_modded}>"

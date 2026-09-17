@@ -13,6 +13,7 @@
   {% if current_user.is_authenticated %}
     <span class="navlinks">
       <a href="{{ url_for('overview', username=current_user.username) }}">Overview</a>
+      <a href="{{ url_for('upload') }}">Upload</a>
       <a href="{{ url_for('runs') }}">Runs</a>
       <span class="who">{{ current_user.username }}</span>
       <form method="post" action="{{ url_for('logout') }}" class="inline">
