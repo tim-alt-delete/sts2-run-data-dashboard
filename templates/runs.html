@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Run history — Slay the Spire 2 stats</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+{% if error %}
+  <h1>Run history</h1>
+  <p class="warn">{{ error }}</p>
+  <p class="note">Expected a path like
+    <code>{platform}/{steamId}/profile1/saves/progress.save</code> under that directory.</p>
+{% else %}
+  <h1>Run history</h1>
+  <p class="note">{{ profile.label }} &middot; <a href="/">← Stats overview</a></p>
+
+  <form method="get">
+    <label>Profile
+      <select name="saves" onchange="this.form.submit()">
+        {% for p in profiles %}
+          <option value="{{ p.saves }}" {% if p.saves == profile.saves %}selected{% endif %}>
+            {{ p.label }} — {{ p.runs }} runs
+          </option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Character
+      <select name="character" onchange="this.form.submit()">
+        <option value="" {% if not character %}selected{% endif %}>All</option>
+        {% for c in characters %}
+          <option value="{{ c }}" {% if c == character %}selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Result
+      <select name="result" onchange="this.form.submit()">
+        <option value="" {% if not result %}selected{% endif %}>All</option>
+        {% for r in ["Win", "Loss", "Abandoned"] %}
+          <option value="{{ r }}" {% if r == result %}selected{% endif %}>{{ r }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </form>
+
+  <p class="note">{{ run_count }} run{{ '' if run_count == 1 else 's' }}</p>
+
+  {{ runs|safe }}
+{% endif %}
+
+</body>
+</html>

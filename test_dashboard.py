@@ -11,8 +11,10 @@ SerializableProgress.cs, CharacterStats.cs, CardStats.cs, UserDataPathProvider.c
 """
 
 import json
+import re
 import shutil
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -49,6 +51,30 @@ VANILLA_PROGRESS = {
 # A freshly created modded profile is ProgressState.CreateDefault() with no history dir.
 MODDED_PROGRESS = {"schema_version": 3, "unique_id": "def", "character_stats": [], "card_stats": []}
 
+# Real .run schema (start_time, players[].character, ascension, win, was_abandoned,
+# killed_by_encounter/event, build_id, map_point_history). Filenames match start_time,
+# as the game names them. Covers all three Result values across three characters.
+RUN_FILES = {
+    "1789424859.run": {  # oldest: a win, nothing killed it
+        "start_time": 1789424859, "ascension": 4, "win": True, "was_abandoned": False,
+        "build_id": "v0.107.1", "killed_by_encounter": "NONE.NONE", "killed_by_event": "NONE.NONE",
+        "players": [{"character": "CHARACTER.IRONCLAD"}],
+        "map_point_history": [[{}, {}], [{}, {}, {}]],  # 5 floors
+    },
+    "1789508732.run": {  # middle: a loss to a named encounter
+        "start_time": 1789508732, "ascension": 0, "win": False, "was_abandoned": False,
+        "build_id": "v0.107.1", "killed_by_encounter": "OWL_MAGISTRATE_NORMAL", "killed_by_event": "NONE.NONE",
+        "players": [{"character": "CHARACTER.SILENT"}],
+        "map_point_history": [[{}, {}, {}, {}, {}, {}]],  # 6 floors
+    },
+    "1789515832.run": {  # newest: quit mid-run
+        "start_time": 1789515832, "ascension": 1, "win": False, "was_abandoned": True,
+        "build_id": "v0.107.2", "killed_by_encounter": "NONE.NONE", "killed_by_event": "NONE.NONE",
+        "players": [{"character": "CHARACTER.DEFECT"}],
+        "map_point_history": [[{}, {}]],  # 2 floors
+    },
+}
+
 
 def build_fixture(root: Path) -> None:
     vanilla = root / "steam" / USER / "profile1" / "saves"
@@ -59,8 +85,8 @@ def build_fixture(root: Path) -> None:
     (vanilla / "progress.save").write_text(json.dumps(VANILLA_PROGRESS), encoding="utf-8")
     (modded / "progress.save").write_text(json.dumps(MODDED_PROGRESS), encoding="utf-8")
 
-    for name in ["1789508732.run", "1789515832.run", "1789424859.run"]:
-        (vanilla / "history" / name).write_text('{"win": false}', encoding="utf-8")
+    for name, content in RUN_FILES.items():
+        (vanilla / "history" / name).write_text(json.dumps(content), encoding="utf-8")
     # The game's own sidecar files, which must be ignored.
     (vanilla / "history" / "1789424859.run.backup").write_text("{}", encoding="utf-8")
     (vanilla / "history" / "1789111111.corrupt").write_text("{}", encoding="utf-8")
@@ -110,7 +136,25 @@ def check_loader(archive: Path) -> None:
     assert sts2data.card_table(empty).empty
     assert sts2data.totals(empty)["win_rate"] is None
 
+    runs = sts2data.runs_table(archive / profile["label"].replace("/", "_"))
+    assert list(runs["character"]) == ["DEFECT", "SILENT", "IRONCLAD"], "newest first"
+    assert list(runs["result"]) == ["Abandoned", "Loss", "Win"]
+    assert list(runs["ascension"]) == [1, 0, 4]
+    assert list(runs["floors_climbed"]) == [2, 6, 5]
+    assert list(runs["build"]) == ["v0.107.2", "v0.107.1", "v0.107.1"]
+    assert runs.loc[1, "killed_by"] == "Owl Magistrate Normal"
+    assert runs.loc[0, "killed_by"] == "" and runs.loc[2, "killed_by"] == "", \
+        "abandoned and win must not show a killer"
+    assert runs.loc[0, "date"] == datetime.fromtimestamp(1789515832).strftime("%Y-%m-%d %H:%M")
+
     print("loader          ok")
+
+
+def table_html(body: str) -> str:
+    """The rendered <table>, isolated from the filter <select> options that
+    otherwise pollute a plain substring search of the whole page."""
+    match = re.search(r"<table.*?</table>", body, re.S)
+    return match.group(0) if match else ""
 
 
 def check_routes() -> None:
@@ -131,6 +175,25 @@ def check_routes() -> None:
         "unknown path must fall back, not read an arbitrary file"
     assert client.get("/api/progress").get_json()["character_stats"][0]["id"] == "CHARACTER.IRONCLAD"
 
+    body = client.get("/runs").get_data(as_text=True)
+    assert "IRONCLAD" in body and "SILENT" in body and "DEFECT" in body
+    assert "Owl Magistrate Normal" in body
+    assert "3 runs" in body
+
+    body = client.get("/runs?character=SILENT").get_data(as_text=True)
+    table = table_html(body)
+    assert "Owl Magistrate Normal" in table
+    assert "IRONCLAD" not in table and "DEFECT" not in table
+    assert "1 run" in body and "1 runs" not in body, "singular count"
+
+    body = client.get("/runs?result=Abandoned").get_data(as_text=True)
+    table = table_html(body)
+    assert "DEFECT" in table
+    assert "IRONCLAD" not in table and "SILENT" not in table
+
+    body = client.get(f"/runs?saves={modded}").get_data(as_text=True)
+    assert "0 runs" in body, "empty modded profile must render, not crash"
+
     print("routes          ok")
 
 
@@ -138,7 +201,9 @@ def check_missing_saves() -> None:
     original = sts2data.BASE
     sts2data.BASE = Path(tempfile.gettempdir()) / "sts2-definitely-not-here"
     try:
-        assert "No save data found" in dashboard.app.test_client().get("/").get_data(as_text=True)
+        client = dashboard.app.test_client()
+        assert "No save data found" in client.get("/").get_data(as_text=True)
+        assert "No save data found" in client.get("/runs").get_data(as_text=True)
     finally:
         sts2data.BASE = original
     print("no save data    ok")

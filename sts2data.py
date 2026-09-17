@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -50,10 +51,25 @@ CARD_COLUMNS = [
     "pick_rate",
 ]
 
+RUN_COLUMNS = [
+    "date",
+    "character",
+    "ascension",
+    "result",
+    "killed_by",
+    "build",
+    "floors_climbed",
+]
+
 
 def entry(model_id: str | None) -> str:
     """'CHARACTER.IRONCLAD' -> 'IRONCLAD'. ModelId serializes as CATEGORY.ENTRY."""
     return (model_id or "?").split(".")[-1]
+
+
+def humanize(model_id_entry: str) -> str:
+    """'OWL_MAGISTRATE_NORMAL' -> 'Owl Magistrate Normal'."""
+    return model_id_entry.replace("_", " ").title()
 
 
 def percent(part: int, whole: int) -> float | None:
@@ -225,6 +241,55 @@ def archive_runs(saves_dir: Path | str, label: str, archive: Path | str | None =
             shutil.copy2(source, target)
             copied += 1
     return copied
+
+
+def load_runs(archive_dir: Path | str) -> list[dict]:
+    """Parse every archived .run file.
+
+    Reads the local archive, not the live history/ dir, so runs stay visible
+    after the game prunes them.
+    """
+    return [
+        json.loads(f.read_text(encoding="utf-8"))
+        for f in sorted(Path(archive_dir).glob("*.run"))
+    ]
+
+
+def runs_table(archive_dir: Path | str) -> pd.DataFrame:
+    """One row per archived run, newest first."""
+    rows = []
+    for run in load_runs(archive_dir):
+        player = (run.get("players") or [{}])[0]
+
+        killed = run.get("killed_by_encounter") or "NONE.NONE"
+        if entry(killed) == "NONE":
+            killed = run.get("killed_by_event") or "NONE.NONE"
+        killed_entry = entry(killed)
+
+        if run.get("was_abandoned"):
+            result = "Abandoned"
+        elif run.get("win"):
+            result = "Win"
+        else:
+            result = "Loss"
+
+        start_time = run.get("start_time", 0)
+        rows.append(
+            {
+                "start_time": start_time,
+                "date": datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M"),
+                "character": entry(player.get("character")),
+                "ascension": run.get("ascension", 0),
+                "result": result,
+                "killed_by": humanize(killed_entry) if killed_entry != "NONE" else "",
+                "build": run.get("build_id", "?"),
+                "floors_climbed": sum(len(act) for act in run.get("map_point_history", [])),
+            }
+        )
+
+    table = pd.DataFrame(rows, columns=["start_time", *RUN_COLUMNS])
+    table = table.sort_values("start_time", ascending=False, ignore_index=True)
+    return table.drop(columns="start_time")
 
 
 def data_loss_report(progress: dict, saves_dir: Path | str) -> dict:

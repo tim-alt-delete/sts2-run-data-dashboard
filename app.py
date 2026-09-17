@@ -57,5 +57,37 @@ def api_progress():
     return jsonify(sts2data.load_progress(selected_profile(profiles)["saves"]))
 
 
+@app.route("/runs")
+def runs():
+    profiles = sts2data.find_profiles()
+    if not profiles:
+        return render_template("runs.html", error=f"No save data found under {sts2data.BASE}")
+
+    profile = selected_profile(profiles)
+    sts2data.archive_runs(profile["saves"], profile["label"])
+    archive_dir = sts2data.ARCHIVE / profile["label"].replace("/", "_")
+    table = sts2data.runs_table(archive_dir)
+
+    characters = sorted(c for c in table["character"].unique() if c)
+    character = request.args.get("character", "")
+    result = request.args.get("result", "")
+
+    if character:
+        table = table[table["character"] == character]
+    if result:
+        table = table[table["result"] == result]
+
+    return render_template(
+        "runs.html",
+        profiles=profiles,
+        profile=profile,
+        characters=characters,
+        character=character,
+        result=result,
+        run_count=len(table),
+        runs=table.to_html(**TABLE_OPTIONS),
+    )
+
+
 if __name__ == "__main__":
     app.run(debug=True)
