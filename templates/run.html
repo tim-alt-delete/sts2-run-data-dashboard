@@ -37,7 +37,31 @@
   </p>
 
   <h2>Path</h2>
-  {{ path|safe }}
+  <table class="stats">
+    <thead>
+      <tr>{% for column in path_columns %}<th>{{ column }}</th>{% endfor %}</tr>
+    </thead>
+    <tbody>
+      {% for row in path_rows %}
+        <tr>
+          <td>{{ row.floor }}</td>
+          <td>{{ row.act }}</td>
+          <td>{{ row.type }}</td>
+          <td>{{ row.room }}</td>
+          <td>{{ row.monsters }}</td>
+          <td>{{ row.turns or '' }}</td>
+          <td>{{ row.hp }}</td>
+          <td>{{ row.gold }}</td>
+          <td class="happened">
+            {%- for part in row.happened -%}
+              <span class="{{ part.kind }}">{{ part.text }}</span>
+              {%- if not loop.last %} <span class="sep">&middot;</span> {% endif -%}
+            {%- endfor -%}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
 
   <h2>Deck</h2>
   {{ deck|safe }}

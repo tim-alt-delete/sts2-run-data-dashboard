@@ -113,7 +113,8 @@ def run_detail(run_id: int):
         "run.html",
         profile=profile,
         summary=sts2data.run_summary(run),
-        path=sts2data.run_path_table(run).to_html(**TABLE_OPTIONS),
+        path_columns=sts2data.PATH_COLUMNS,
+        path_rows=sts2data.run_path_table(run).to_dict("records"),
         deck=sts2data.deck_table(run).to_html(**TABLE_OPTIONS),
         relics=sts2data.relic_table(run).to_html(**TABLE_OPTIONS),
     )

@@ -29,6 +29,11 @@ label { margin-right: 1rem; }
 .loss { color: var(--loss); }
 .abandoned { color: var(--muted); }
 
+/* per-floor activity on the run detail page */
+td.happened { text-align: left; white-space: normal; }
+td.happened .gain { color: var(--text); }
+td.happened .skip, td.happened .sep { color: var(--muted); }
+
 code {
   background: var(--code-bg);
   padding: 0.1rem 0.3rem;

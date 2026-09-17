@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -71,6 +72,7 @@ PATH_COLUMNS = [
     "turns",
     "hp",
     "gold",
+    "happened",
 ]
 
 
@@ -355,6 +357,129 @@ def run_summary(run: dict) -> dict:
     }
 
 
+def event_choice_text(choice: dict) -> str:
+    """The option taken at an event, e.g. 'Take'.
+
+    title.table discriminates two shapes. 'events' keys look like
+    NAME.pages.PAGE.options.OPTION.title. 'relics' keys are just
+    RELIC_NAME.title and only occur at ancients, where ancient_choice already
+    names the relic, so they are skipped to avoid reporting it twice.
+    """
+    title = choice.get("title") or {}
+    key = title.get("key") or ""
+    if title.get("table") != "events" or ".options." not in key:
+        return ""
+    parts = key.split(".")
+    return humanize(parts[parts.index("options") + 1])
+
+
+def floor_events(stats: dict) -> list[dict]:
+    """What happened on one floor, as {text, kind} parts.
+
+    kind is 'gain' for things acquired, 'skip' for rewards declined (rendered
+    muted), and 'note' for everything else.
+
+    Two sources overlap and must be subtracted, or entries double-report:
+    every picked card also appears in cards_gained, and every shop purchase
+    also appears in relic_choices/potion_choices as picked.
+    """
+    parts: list[dict] = []
+
+    def add(text: str, kind: str = "note") -> None:
+        if text:
+            parts.append({"text": text, "kind": kind})
+
+    def names(counter: Counter) -> list[str]:
+        return [
+            humanize(entry(i)) if n == 1 else f"{humanize(entry(i))} \u00d7{n}"
+            for i, n in counter.items()
+        ]
+
+    # What was chosen.
+    for choice in stats.get("event_choices") or []:
+        add(event_choice_text(choice))
+    for choice in stats.get("rest_site_choices") or []:
+        add(humanize(choice))
+
+    # Deck edits.
+    for change in stats.get("cards_transformed") or []:
+        original = describe_card(change.get("original_card") or {})
+        final = describe_card(change.get("final_card") or {})
+        add(f"{original} \u2192 {final}")
+    for change in stats.get("cards_enchanted") or []:
+        add(f"enchanted {describe_card(change.get('card') or {})}")
+    for card in stats.get("upgraded_cards") or []:
+        add(f"upgraded {humanize(entry(card))}")
+    for card in stats.get("cards_removed") or []:
+        add(f"removed {describe_card(card)}")
+
+    # Purchases, which also show up as picked choices below.
+    bought_cards = Counter(stats.get("bought_colorless") or [])
+    bought_relics = Counter(stats.get("bought_relics") or [])
+    bought_potions = Counter(stats.get("bought_potions") or [])
+
+    # Card rewards: picked cards are always repeated in cards_gained, so
+    # subtract them to leave only cards granted without a choice.
+    picked_cards: Counter = Counter()
+    skipped: list[str] = []
+    for choice in stats.get("card_choices") or []:
+        card = choice.get("card") or {}
+        if choice.get("was_picked"):
+            picked_cards[card.get("id")] += 1
+        else:
+            skipped.append(describe_card(card))
+
+    # An ancient's chosen option is always also a picked relic below, so only
+    # the options turned down are worth reporting here.
+    for choice in stats.get("ancient_choice") or []:
+        if not choice.get("was_chosen"):
+            skipped.append(humanize(choice.get("TextKey", "")))
+
+    gained = Counter(c.get("id") for c in stats.get("cards_gained") or [])
+    for name in names(picked_cards + (gained - picked_cards - bought_cards)):
+        add(f"+{name}", "gain")
+
+    for key, bought in (("relic_choices", bought_relics), ("potion_choices", bought_potions)):
+        for choice in stats.get(key) or []:
+            name = humanize(entry(choice.get("choice")))
+            if not choice.get("was_picked"):
+                skipped.append(name)
+            elif choice.get("choice") not in bought:
+                add(f"+{name}", "gain")
+
+    for name in names(bought_cards + bought_relics + bought_potions):
+        add(f"bought {name}", "gain")
+
+    for potion in stats.get("potion_used") or []:
+        add(f"used {humanize(entry(potion))}")
+    for potion in stats.get("potion_discarded") or []:
+        add(f"discarded {humanize(entry(potion))}")
+
+    if skipped:
+        add("skipped " + ", ".join(skipped), "skip")
+
+    # Collapse repeats: upgrading two copies of Defend, or gaining two of the
+    # same potion, records two identical entries.
+    merged: list[dict] = []
+    index: dict[tuple[str, str], dict] = {}
+    for part in parts:
+        key = (part["text"], part["kind"])
+        if key in index:
+            index[key]["count"] += 1
+        else:
+            item = {**part, "count": 1}
+            index[key] = item
+            merged.append(item)
+
+    return [
+        {
+            "text": i["text"] if i["count"] == 1 else f"{i['text']} \u00d7{i['count']}",
+            "kind": i["kind"],
+        }
+        for i in merged
+    ]
+
+
 def describe_monsters(room: dict) -> str:
     """'Wriggler x4'. Monster lists repeat the same id per copy."""
     counts: dict[str, int] = {}
@@ -397,6 +522,7 @@ def run_path_table(run: dict) -> pd.DataFrame:
                     "turns": sum(r.get("turns_taken", 0) for r in rooms),
                     "hp": f"{stats.get('current_hp', 0)}/{stats.get('max_hp', 0)}",
                     "gold": stats.get("current_gold", 0),
+                    "happened": floor_events(stats),
                 }
             )
 
@@ -426,13 +552,39 @@ def deck_table(run: dict) -> pd.DataFrame:
 
 
 def relic_table(run: dict) -> pd.DataFrame:
-    """Relics held at the end, in the order they were picked up."""
+    """Relics held at the end, with where each came from.
+
+    The source is worked out from what the floor actually recorded, not from
+    the floor's room type alone: a rest site can grant a relic (hatching an
+    egg), and a relic that no floor records acquiring is a starting relic.
+    """
+    acquired: dict[str, str] = {}
+    floor = 0
+    for act in run.get("map_point_history", []):
+        for point in act:
+            floor += 1
+            stats = (point.get("player_stats") or [{}])[0]
+            point_type = humanize(point.get("map_point_type") or "")
+
+            for relic in stats.get("bought_relics") or []:
+                acquired[f"{relic}@{floor}"] = "Shop"
+            for choice in stats.get("relic_choices") or []:
+                if choice.get("was_picked"):
+                    acquired.setdefault(f"{choice.get('choice')}@{floor}", point_type)
+
     player = (run.get("players") or [{}])[0]
-    rows = [
-        {"relic": humanize(entry(r.get("id"))), "floor": r.get("floor_added_to_deck", 0)}
-        for r in player.get("relics") or []
-    ]
-    table = pd.DataFrame(rows, columns=["relic", "floor"])
+    rows = []
+    for relic in player.get("relics") or []:
+        at = relic.get("floor_added_to_deck", 0)
+        rows.append(
+            {
+                "relic": humanize(entry(relic.get("id"))),
+                "floor": at,
+                "source": acquired.get(f"{relic.get('id')}@{at}", "Starting"),
+            }
+        )
+
+    table = pd.DataFrame(rows, columns=["relic", "floor", "source"])
     return table.sort_values("floor", ignore_index=True)
 
 

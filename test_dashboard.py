@@ -72,6 +72,7 @@ RUN_FILES = {
             ],
             "relics": [
                 {"id": "RELIC.VAJRA", "floor_added_to_deck": 3},
+                {"id": "RELIC.BYRDPIP", "floor_added_to_deck": 2},
                 {"id": "RELIC.BURNING_BLOOD", "floor_added_to_deck": 1},
             ],
         }],
@@ -87,11 +88,18 @@ RUN_FILES = {
                                        {"card": {"id": "CARD.SETUP_STRIKE"}, "was_picked": True},
                                        {"card": {"id": "CARD.TREMBLE"}, "was_picked": False},
                                        {"card": {"id": "CARD.BLOOD_WALL"}, "was_picked": False}]}]},
-                # Rest site: no model_id, only a room_type.
+                # Rest site: no model_id, only a room_type. Hatching an egg here
+                # transforms a card and grants a relic, so a relic's floor does
+                # not have to be an obvious relic room.
                 {"map_point_type": "rest_site",
                  "rooms": [{"room_type": "rest_site", "turns_taken": 0}],
                  "player_stats": [{"player_id": 1, "current_hp": 80, "max_hp": 80, "current_gold": 119,
-                                   "rest_site_choices": ["HATCH"]}]},
+                                   "rest_site_choices": ["HATCH"],
+                                   "cards_transformed": [{
+                                       "original_card": {"id": "CARD.BYRDONIS_EGG", "floor_added_to_deck": 1},
+                                       "final_card": {"id": "CARD.BYRD_SWOOP", "floor_added_to_deck": 2}}],
+                                   "relic_choices": [
+                                       {"choice": "RELIC.BYRDPIP", "was_picked": True}]}]},
             ],
             [
                 # Event that leads into a fight: two rooms on one map point.
@@ -108,7 +116,22 @@ RUN_FILES = {
                 {"map_point_type": "shop",
                  "rooms": [{"room_type": "shop", "turns_taken": 0}],
                  "player_stats": [{"player_id": 1, "current_hp": 61, "max_hp": 80, "current_gold": 20,
-                                   "bought_relics": ["RELIC.MINIATURE_TENT"]}]},
+                                   "bought_relics": ["RELIC.MINIATURE_TENT"],
+                                   "relic_choices": [
+                                       {"choice": "RELIC.MINIATURE_TENT", "was_picked": True}]}]},
+                # Ancient: the chosen option is also a picked relic, and the
+                # event_choices entry repeats its name with table 'relics'.
+                {"map_point_type": "ancient",
+                 "rooms": [{"model_id": "EVENT.TEZCATARA", "room_type": "event", "turns_taken": 0}],
+                 "player_stats": [{"player_id": 1, "current_hp": 61, "max_hp": 80, "current_gold": 20,
+                                   "event_choices": [{"title": {
+                                       "key": "YUMMY_COOKIE.title", "table": "relics"}}],
+                                   "ancient_choice": [
+                                       {"TextKey": "YUMMY_COOKIE", "was_chosen": True},
+                                       {"TextKey": "STORYBOOK", "was_chosen": False}],
+                                   "relic_choices": [
+                                       {"choice": "RELIC.YUMMY_COOKIE", "was_picked": True}],
+                                   "upgraded_cards": ["CARD.DEFEND_IRONCLAD", "CARD.DEFEND_IRONCLAD"]}]},
             ],
         ],
     },
@@ -195,7 +218,7 @@ def check_loader(archive: Path) -> None:
     assert list(runs["character"]) == ["DEFECT", "SILENT", "IRONCLAD"], "newest first"
     assert list(runs["result"]) == ["Abandoned", "Loss", "Win"]
     assert list(runs["ascension"]) == [1, 0, 4]
-    assert list(runs["floors_climbed"]) == [2, 6, 4]
+    assert list(runs["floors_climbed"]) == [2, 6, 5]
     assert list(runs["build"]) == ["v0.107.2", "v0.107.1", "v0.107.1"]
     assert list(runs["seed"]) == ["QLDTDQLGQY", "0VD3JRH6FY", "3J6ZXDRGZE"]
     assert list(runs["run_id"]) == [1789515832, 1789508732, 1789424859], "run_id links the detail page"
@@ -219,17 +242,17 @@ def check_run_detail(archive: Path) -> None:
     assert summary["result"] == "Win"
     assert summary["seed"] == "3J6ZXDRGZE"
     assert summary["run_time"] == "1:02:05", "run_time is seconds"
-    assert summary["floors_climbed"] == 4
-    assert summary["deck_size"] == 4 and summary["relic_count"] == 2
+    assert summary["floors_climbed"] == 5
+    assert summary["deck_size"] == 4 and summary["relic_count"] == 3
     assert summary["final_hp"] == "61/80", "HP from the last floor reached"
     assert summary["badges"] == "Elite (bronze)"
     assert summary["killed_by"] == "", "a win has no killer"
 
     path = sts2data.run_path_table(run)
-    assert list(path["floor"]) == [1, 2, 3, 4], "floor is cumulative across acts"
-    assert list(path["act"]) == ["Overgrowth", "Overgrowth", "Hive", "Hive"], \
+    assert list(path["floor"]) == [1, 2, 3, 4, 5], "floor is cumulative across acts"
+    assert list(path["act"]) == ["Overgrowth", "Overgrowth", "Hive", "Hive", "Hive"], \
         "acts indexed by position, not zipped"
-    assert list(path["type"]) == ["Monster", "Rest Site", "Unknown", "Shop"]
+    assert list(path["type"]) == ["Monster", "Rest Site", "Unknown", "Shop", "Ancient"]
     assert path.loc[0, "monsters"] == "Nibbit \u00d72", "repeated monster ids collapse to a count"
     assert path.loc[1, "room"] == "", "rest sites carry no model_id"
     assert path.loc[2, "room"] == "Dense Vegetation \u2192 Dense Vegetation Event Encounter", \
@@ -237,13 +260,39 @@ def check_run_detail(archive: Path) -> None:
     assert path.loc[2, "turns"] == 8 and path.loc[2, "monsters"] == "Wriggler \u00d74"
     assert path.loc[0, "hp"] == "78/80" and path.loc[0, "gold"] == 119
 
+    def happened(floor_index: int) -> list[tuple[str, str]]:
+        return [(p["text"], p["kind"]) for p in path.loc[floor_index, "happened"]]
+
+    # A picked card is always repeated in cards_gained; it must not double-report.
+    assert happened(0) == [
+        ("+Setup Strike", "gain"),
+        ("skipped Tremble, Blood Wall", "skip"),
+    ]
+    assert happened(1) == [
+        ("Hatch", "note"),
+        ("Byrdonis Egg \u2192 Byrd Swoop", "note"),
+        ("+Byrdpip", "gain"),
+    ], "a rest site can grant a relic; the transform explains where it came from"
+    assert happened(2) == [("Rest", "note")], "event option parsed from the .options. key"
+    # A shop purchase also appears in relic_choices as picked; only 'bought' should show.
+    assert happened(3) == [("bought Miniature Tent", "gain")]
+    # The ancient's chosen relic must not also appear as its own note, and the
+    # two upgraded copies of Defend collapse to one entry.
+    assert happened(4) == [
+        ("upgraded Defend Ironclad \u00d72", "note"),
+        ("+Yummy Cookie", "gain"),
+        ("skipped Storybook", "skip"),
+    ]
+
     deck = sts2data.deck_table(run)
     assert dict(zip(deck["card"], deck["count"])) == {
         "Strike Ironclad": 2, "Bash+": 1, "Stomp (Instinct)": 1,
     }, "duplicates grouped, upgrades and enchantments marked"
 
     relics = sts2data.relic_table(run)
-    assert list(relics["relic"]) == ["Burning Blood", "Vajra"], "ordered by floor acquired"
+    assert list(relics["relic"]) == ["Burning Blood", "Byrdpip", "Vajra"], "ordered by floor acquired"
+    assert list(relics["source"]) == ["Starting", "Rest Site", "Starting"], \
+        "source comes from what the floor recorded, not the room type alone"
 
     print("run detail      ok")
 
@@ -304,6 +353,11 @@ def check_routes() -> None:
     assert "IRONCLAD" in body and "3J6ZXDRGZE" in body
     assert "Dense Vegetation \u2192 Dense Vegetation Event Encounter" in body
     assert "Strike Ironclad" in body and "Burning Blood" in body
+    assert '<span class="gain">+Setup Strike</span>' in body
+    assert '<span class="skip">skipped Tremble, Blood Wall</span>' in body, \
+        "declined rewards render muted"
+    assert "Byrdonis Egg \u2192 Byrd Swoop" in body and "Rest Site" in body, \
+        "relic provenance is visible without cross-referencing the path"
 
     missing = client.get("/run/9999999999")
     assert missing.status_code == 404, "unarchived run must 404"
