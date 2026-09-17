@@ -6,29 +6,26 @@
 
   <div class="authforms">
     <section class="card">
-      <h2>Choose files</h2>
+      <h2>Choose a folder</h2>
       <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
-        <label>A whole folder
-          {# webkitdirectory turns the picker into a folder chooser. It has to be
-             its own input: one input cannot offer both files and folders. #}
-          <input type="file" name="files" webkitdirectory directory multiple>
+        <label>Your saves folder
+          {# webkitdirectory turns the picker into a folder chooser. It cannot be
+             combined with ordinary file selection on the same input. #}
+          <input type="file" name="files" webkitdirectory directory multiple required>
         </label>
-        <p class="note">Pick your <code>saves</code> folder and everything under it
-          is sent. Files that are not run history are ignored.</p>
-
-        <label>Or individual files
-          <input type="file" name="files" multiple accept=".run,.save">
-        </label>
+        <p class="note">Everything under the folder is sent. Files that are not run
+          history are ignored, so pointing this at <code>saves</code> is enough.</p>
 
         <label class="checkbox">
           <input type="checkbox" name="modded" value="1">
           Treat all of these as modded runs
         </label>
-        <p class="note">Runs under the game's <code>modded/</code> folder are detected
-          from the folder name on their own. Tick the box only when picking
-          individual files, where the browser sends no folder name.</p>
+        <p class="note">Browsers send each file's path relative to the folder you pick,
+          so <code>modded</code> is only detected when you select at or above the folder
+          containing it. Picking a <code>saves</code> folder inside
+          <code>modded/</code> looks identical to a vanilla one, so tick the box.</p>
 
         <button type="submit">Upload</button>
       </form>
@@ -38,9 +35,10 @@
       <h2>Where are my saves?</h2>
       <p class="note">macOS</p>
       <code>~/Library/Application Support/SlayTheSpire2/steam/&lt;id&gt;/profile1/saves</code>
-      <p class="note">Upload the <code>history</code> folder for your runs, and
-        <code>progress.save</code> for lifetime totals. Uploading the same run twice
-        is harmless: it is matched on its start time and skipped.</p>
+      <p class="note">Selecting <code>steam/&lt;id&gt;</code> instead picks up every
+        profile at once, vanilla and modded, each tagged correctly.</p>
+      <p class="note">Uploading the same run twice is harmless: runs are matched on
+        their start time and skipped.</p>
       <p class="note">The game only keeps its last 100 runs, so anything older than
         that is already gone unless you have archived it.</p>
     </section>

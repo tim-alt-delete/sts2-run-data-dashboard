@@ -443,6 +443,23 @@ def check_secret_key() -> None:
     print("secret key      ok")
 
 
+def check_upload_form() -> None:
+    """The picker must choose a folder, not descend into one."""
+    _app, client = make_client("tim")
+    form = client.get("/upload").get_data(as_text=True)
+
+    inputs = re.findall(r"<input[^>]*type=\"file\"[^>]*>", form)
+    assert len(inputs) == 1, f"expected a single file input, found {len(inputs)}"
+    assert "webkitdirectory" in inputs[0], \
+        "without webkitdirectory the picker can only descend into folders"
+    assert "multiple" in inputs[0]
+    assert 'name="files"' in inputs[0]
+    assert 'name="modded"' in form, \
+        "the checkbox is the only way to tag a saves folder selected inside modded/"
+
+    print("upload form     ok")
+
+
 def check_upload_folder() -> None:
     """Selecting the whole saves folder must work and must be quiet about it."""
     app, client = make_client("tim")
@@ -728,6 +745,7 @@ def main() -> None:
             check_csrf()
             check_secret_key()
             check_upload()
+            check_upload_form()
             check_upload_folder()
             check_upload_modded()
             check_upload_privacy()
