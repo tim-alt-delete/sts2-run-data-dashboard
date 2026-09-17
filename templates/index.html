@@ -3,19 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>Slay the Spire 2 stats</title>
-  <style>
-    body { font-family: -apple-system, system-ui, sans-serif; margin: 2rem; max-width: 70rem; }
-    h1 { margin-bottom: 0.2rem; }
-    form { margin: 1rem 0; }
-    label { margin-right: 1rem; }
-    .totals { font-size: 1.1rem; margin: 1rem 0; }
-    .note { color: #555; font-size: 0.9rem; }
-    .warn { color: #a00; }
-    table.stats { border-collapse: collapse; margin-bottom: 2rem; }
-    table.stats th, table.stats td { padding: 0.3rem 0.7rem; text-align: right; border-bottom: 1px solid #ddd; }
-    table.stats th:first-child, table.stats td:first-child { text-align: left; }
-    table.stats tbody tr:hover { background: #f4f4f4; }
-  </style>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
 

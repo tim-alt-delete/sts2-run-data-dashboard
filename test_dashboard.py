@@ -122,6 +122,8 @@ def check_routes() -> None:
     assert "LUCKY_ONCE" not in body
     assert "20.0%</strong> win rate" in body
     assert "12 were pruned" in body
+    assert 'href="/static/style.css"' in body, "page must link the stylesheet"
+    assert client.get("/static/style.css").status_code == 200, "stylesheet must actually be served"
 
     assert "LUCKY_ONCE" in client.get("/?min_runs=0").get_data(as_text=True)
     assert "modded save tree" in client.get(f"/?saves={modded}").get_data(as_text=True)
