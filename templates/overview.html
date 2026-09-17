@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}{{ user.username }} — Slay the Spire 2 stats{% endblock %}
+
+{% block content %}
+  <h1>{{ user.username }}</h1>
+  <p class="note">Your overview.</p>
+
+  <section class="card">
+    <h2>No runs yet</h2>
+    <p>Uploading is not built yet. Until then, the
+      <a href="{{ url_for('local_stats') }}">local save reader</a> still works against
+      the save folder on this machine.</p>
+  </section>
+{% endblock %}

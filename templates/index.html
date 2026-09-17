@@ -1,65 +1,48 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Slay the Spire 2 stats</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-</head>
-<body>
+{% extends "base.html" %}
+{% block title %}Log in — Slay the Spire 2 stats{% endblock %}
 
-{% if error %}
+{% block content %}
   <h1>Slay the Spire 2 stats</h1>
-  <p class="warn">{{ error }}</p>
-  <p class="note">Expected a path like
-    <code>{platform}/{steamId}/profile1/saves/progress.save</code> under that directory.</p>
-{% else %}
-  <h1>Slay the Spire 2 stats</h1>
-  <p class="note">{{ profile.label }} &middot; <a href="/runs">Run history →</a></p>
+  <p class="note">Track your runs, wins and losses. Upload your save files to get started.</p>
 
-  <form method="get">
-    <label>Profile
-      <select name="saves" onchange="this.form.submit()">
-        {% for p in profiles %}
-          <option value="{{ p.saves }}" {% if p.saves == profile.saves %}selected{% endif %}>
-            {{ p.label }} — {{ p.runs }} runs
-          </option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>Min runs per card
-      <input type="number" name="min_runs" value="{{ min_runs }}" min="0" style="width: 4rem">
-    </label>
-    <button type="submit">Apply</button>
-  </form>
+  <div class="authforms">
+    <section class="card">
+      <h2>Log in</h2>
+      <form method="post" action="{{ url_for('login') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="next" value="{{ next }}">
+        <label>Username
+          <input type="text" name="username" autocomplete="username" required
+                 autocapitalize="none" spellcheck="false">
+        </label>
+        <label>Password
+          <input type="password" name="password" autocomplete="current-password" required>
+        </label>
+        <button type="submit">Log in</button>
+      </form>
+    </section>
 
-  <p class="totals">
-    <strong>{{ totals.runs }}</strong> runs &middot;
-    <strong>{{ totals.wins }}</strong> wins &middot;
-    <strong>{{ totals.losses }}</strong> losses &middot;
-    <strong>{{ totals.win_rate if totals.win_rate is not none else '-' }}%</strong> win rate &middot;
-    {{ totals.playtime }} played &middot;
-    {{ totals.floors_climbed }} floors climbed
-  </p>
-
-  {% if profile.is_modded %}
-    <p class="note warn">This is the modded save tree. Runs played with a mod loaded
-      are tracked separately and never counted toward vanilla stats.</p>
-  {% endif %}
-
-  <p class="note">
-    Archived {{ archived }} new run file{{ '' if archived == 1 else 's' }}.
-    {{ loss.on_disk }} of {{ loss.recorded }} runs still have files on disk.
-    {% if loss.missing %}
-      <span class="warn">{{ loss.missing }} were pruned by the game before they could be archived.</span>
-    {% endif %}
-  </p>
-
-  <h2>By character</h2>
-  {{ characters|safe }}
-
-  <h2>By card <span class="note">(at least {{ min_runs }} runs)</span></h2>
-  {{ cards|safe }}
-{% endif %}
-
-</body>
-</html>
+    <section class="card">
+      <h2>Register</h2>
+      <form method="post" action="{{ url_for('register') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>Username
+          <input type="text" name="username" autocomplete="username" required
+                 autocapitalize="none" spellcheck="false"
+                 pattern="[A-Za-z0-9_-]{3,32}"
+                 title="3 to 32 characters: letters, numbers, hyphens, underscores">
+        </label>
+        <label>Email <span class="note">(optional)</span>
+          <input type="email" name="email" autocomplete="email">
+        </label>
+        <label>Password
+          <input type="password" name="password" autocomplete="new-password" required
+                 minlength="8" title="At least 8 characters">
+        </label>
+        <button type="submit">Create account</button>
+      </form>
+      <p class="note">Email is optional and never sent anything. It only exists so
+        password reset can be added later.</p>
+    </section>
+  </div>
+{% endblock %}

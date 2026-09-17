@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Slay the Spire 2 stats{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<nav class="topnav">
+  <a class="brand" href="{{ url_for('index') }}">Slay the Spire 2 stats</a>
+  {% if current_user.is_authenticated %}
+    <span class="navlinks">
+      <a href="{{ url_for('overview', username=current_user.username) }}">Overview</a>
+      <a href="{{ url_for('runs') }}">Runs</a>
+      <span class="who">{{ current_user.username }}</span>
+      <form method="post" action="{{ url_for('logout') }}" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="linkish">Log out</button>
+      </form>
+    </span>
+  {% endif %}
+</nav>
+
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% if messages %}
+    <ul class="flashes">
+      {% for category, message in messages %}
+        <li class="{{ 'warn' if category == 'error' else 'note' }}">{{ message }}</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+{% endwith %}
+
+<main>
+{% block content %}{% endblock %}
+</main>
+
+</body>
+</html>

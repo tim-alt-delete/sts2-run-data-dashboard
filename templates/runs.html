@@ -1,11 +1,7 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Run history — Slay the Spire 2 stats</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-</head>
-<body>
+{% extends "base.html" %}
+{% block title %}Run history — Slay the Spire 2 stats{% endblock %}
+
+{% block content %}
 
 {% if error %}
   <h1>Run history</h1>
@@ -14,7 +10,7 @@
     <code>{platform}/{steamId}/profile1/saves/progress.save</code> under that directory.</p>
 {% else %}
   <h1>Run history</h1>
-  <p class="note">{{ profile.label }} &middot; <a href="/">← Stats overview</a></p>
+  <p class="note">{{ profile.label }} &middot; <a href="{{ url_for('local_stats') }}">← Local saves</a></p>
 
   <form method="get">
     <label>Profile
@@ -66,6 +62,4 @@
     </tbody>
   </table>
 {% endif %}
-
-</body>
-</html>
+{% endblock %}

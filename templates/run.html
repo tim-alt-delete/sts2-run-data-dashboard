@@ -1,16 +1,12 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Run detail — Slay the Spire 2 stats</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-</head>
-<body>
+{% extends "base.html" %}
+{% block title %}Run detail — Slay the Spire 2 stats{% endblock %}
+
+{% block content %}
 
 {% if error %}
   <h1>Run detail</h1>
   <p class="warn">{{ error }}</p>
-  <p class="note"><a href="/runs">← Run history</a></p>
+  <p class="note"><a href="{{ url_for('runs') }}">← Run history</a></p>
 {% else %}
   <h1>{{ summary.character }} &middot;
     <span class="{{ summary.result|lower }}">{{ summary.result }}</span>
@@ -69,6 +65,4 @@
   <h2>Relics</h2>
   {{ relics|safe }}
 {% endif %}
-
-</body>
-</html>
+{% endblock %}

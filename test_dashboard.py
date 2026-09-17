@@ -1,8 +1,8 @@
-"""Self-check for the dashboard, against a synthetic save tree.
+"""Self-check for the dashboard.
 
-Runs without the game installed. Verifies path discovery, parsing and the
-Flask routes, so you can confirm the install works before pointing it at real
-save data.
+Runs without the game installed, against a synthetic save tree and an
+in-memory database, so you can confirm the install works before pointing it at
+real save data.
 
     python test_dashboard.py
 
@@ -11,6 +11,7 @@ SerializableProgress.cs, CharacterStats.cs, CardStats.cs, UserDataPathProvider.c
 """
 
 import json
+import os
 import re
 import shutil
 import tempfile
@@ -21,6 +22,19 @@ import pandas as pd
 
 import app as dashboard
 import sts2data
+from config import TestConfig
+from models import User, db
+
+PASSWORD = "correct-horse-battery"
+
+
+def make_client(username: str | None = "tim"):
+    """A test client, optionally already registered and logged in."""
+    app = dashboard.create_app(TestConfig)
+    client = app.test_client()
+    if username:
+        client.post("/register", data={"username": username, "password": PASSWORD})
+    return app, client
 
 USER = "76561198182361854"
 
@@ -304,11 +318,134 @@ def table_html(body: str) -> str:
     return match.group(0) if match else ""
 
 
+def check_auth() -> None:
+    app, client = make_client(username=None)
+
+    # registration
+    r = client.post("/register", data={"username": "Tim", "password": PASSWORD})
+    assert r.status_code == 302 and r.headers["Location"] == "/u/tim", \
+        "registering logs you in and lands on your overview"
+    with app.app_context():
+        user = User.by_username("tim")
+        assert user is not None and user.email is None
+        assert PASSWORD not in user.password_hash, "password must never be stored in the clear"
+        assert user.password_hash.startswith("scrypt:"), user.password_hash[:20]
+        assert user.check_password(PASSWORD) and not user.check_password("wrong")
+
+    assert client.get("/u/tim").status_code == 200
+    assert b"tim" in client.get("/").data or client.get("/").status_code == 302
+
+    # logout, then the same account can log back in
+    assert client.post("/logout").status_code == 302
+    r = client.post("/login", data={"username": "TIM", "password": PASSWORD})
+    assert r.status_code == 302 and r.headers["Location"] == "/u/tim", \
+        "usernames are case-insensitive"
+
+    # a wrong password and an unknown account must be indistinguishable
+    _app2, fresh = make_client(username=None)
+    fresh.post("/register", data={"username": "tim", "password": PASSWORD})
+    fresh.post("/logout")
+    wrong = fresh.post("/login", data={"username": "tim", "password": "nope"})
+    missing = fresh.post("/login", data={"username": "ghost", "password": "nope"})
+    assert wrong.status_code == missing.status_code == 401
+    assert wrong.get_data() == missing.get_data(), \
+        "a wrong password and an unknown account must be byte-identical"
+    assert "Invalid username or password." in wrong.get_data(as_text=True)
+
+    # validation
+    _app3, v = make_client(username=None)
+    for bad, reason in (
+        ({"username": "ab", "password": PASSWORD}, "too short"),
+        ({"username": "has space", "password": PASSWORD}, "illegal character"),
+        ({"username": "ok-name", "password": "short"}, "weak password"),
+    ):
+        r = v.post("/register", data=bad)
+        assert r.status_code == 400, f"{reason} must be rejected"
+    with app.app_context():
+        pass
+    assert v.post("/register", data={"username": "ok-name", "password": PASSWORD}).status_code == 302
+    dupe = v.post("/register", data={"username": "OK-NAME", "password": PASSWORD})
+    assert dupe.status_code == 400, "duplicate username must be rejected regardless of case"
+
+    print("auth            ok")
+
+
+def check_privacy() -> None:
+    app, client = make_client("tim")
+    with app.app_context():
+        other = User(username="someone-else")
+        other.set_password(PASSWORD)
+        db.session.add(other)
+        db.session.commit()
+
+    # someone else's overview is indistinguishable from a name nobody has taken
+    assert client.get("/u/someone-else").status_code == 404
+    assert client.get("/u/nobody-at-all").status_code == 404
+    assert client.get("/u/tim").status_code == 200
+
+    # logged out, protected pages redirect to the landing page rather than render
+    _app, anon = make_client(username=None)
+    for path in ("/u/tim", "/local", "/local/runs", "/local/run/1789424859"):
+        r = anon.get(path)
+        assert r.status_code == 302 and r.headers["Location"].startswith("/?next="), \
+            f"{path} must require a login, got {r.status_code}"
+
+    print("privacy         ok")
+
+
+def check_csrf() -> None:
+    """CSRF is disabled in TestConfig, so this checks it with protection on."""
+
+    class CsrfConfig(TestConfig):
+        WTF_CSRF_ENABLED = True
+
+    app = dashboard.create_app(CsrfConfig)
+    client = app.test_client()
+    r = client.post("/register", data={"username": "tim", "password": PASSWORD})
+    assert r.status_code == 400, "a form without a CSRF token must be rejected"
+    assert b"CSRF" in r.data or b"csrf" in r.data
+
+    # the real form carries a token, so a normal browser flow still works
+    token = re.search(r'name="csrf_token" value="([^"]+)"',
+                      client.get("/").get_data(as_text=True)).group(1)
+    r = client.post("/register",
+                    data={"username": "tim", "password": PASSWORD, "csrf_token": token})
+    assert r.status_code == 302, "a form with a valid token must be accepted"
+
+    print("csrf            ok")
+
+
+def check_secret_key() -> None:
+    """The app must not start on a missing secret key outside debug."""
+    import config
+
+    original_key, original_env = config.Config.SECRET_KEY, os.environ.get("FLASK_DEBUG")
+    config.Config.SECRET_KEY = None
+    os.environ.pop("FLASK_DEBUG", None)
+    try:
+        try:
+            config.resolve()
+        except RuntimeError as exc:
+            assert "SECRET_KEY" in str(exc)
+        else:
+            raise AssertionError("a missing SECRET_KEY must refuse to start")
+
+        os.environ["FLASK_DEBUG"] = "1"
+        assert config.resolve().SECRET_KEY, "debug mode falls back to a throwaway key"
+    finally:
+        config.Config.SECRET_KEY = original_key
+        os.environ.pop("FLASK_DEBUG", None)
+        if original_env is not None:
+            os.environ["FLASK_DEBUG"] = original_env
+
+    print("secret key      ok")
+
+
 def check_routes() -> None:
-    client = dashboard.app.test_client()
+    _app, client = make_client()
     modded = sts2data.find_profiles()[1]["saves"]
 
-    body = client.get("/").get_data(as_text=True)
+    body = client.get("/local").get_data(as_text=True)
     assert "IRONCLAD" in body and "OFFERING" in body
     assert "LUCKY_ONCE" not in body
     assert "20.0%</strong> win rate" in body
@@ -316,38 +453,38 @@ def check_routes() -> None:
     assert 'href="/static/style.css"' in body, "page must link the stylesheet"
     assert client.get("/static/style.css").status_code == 200, "stylesheet must actually be served"
 
-    assert "LUCKY_ONCE" in client.get("/?min_runs=0").get_data(as_text=True)
-    assert "modded save tree" in client.get(f"/?saves={modded}").get_data(as_text=True)
-    assert "IRONCLAD" in client.get("/?saves=/etc/passwd").get_data(as_text=True), \
+    assert "LUCKY_ONCE" in client.get("/local?min_runs=0").get_data(as_text=True)
+    assert "modded save tree" in client.get(f"/local?saves={modded}").get_data(as_text=True)
+    assert "IRONCLAD" in client.get("/local?saves=/etc/passwd").get_data(as_text=True), \
         "unknown path must fall back, not read an arbitrary file"
-    assert client.get("/api/progress").get_json()["character_stats"][0]["id"] == "CHARACTER.IRONCLAD"
+    assert client.get("/local/api/progress").get_json()["character_stats"][0]["id"] == "CHARACTER.IRONCLAD"
 
-    body = client.get("/runs").get_data(as_text=True)
+    body = client.get("/local/runs").get_data(as_text=True)
     assert "IRONCLAD" in body and "SILENT" in body and "DEFECT" in body
     assert "Owl Magistrate Normal" in body
     assert "3 runs" in body
 
-    body = client.get("/runs?character=SILENT").get_data(as_text=True)
+    body = client.get("/local/runs?character=SILENT").get_data(as_text=True)
     table = table_html(body)
     assert "Owl Magistrate Normal" in table
     assert "IRONCLAD" not in table and "DEFECT" not in table
     assert "1 run" in body and "1 runs" not in body, "singular count"
 
-    body = client.get("/runs?result=Abandoned").get_data(as_text=True)
+    body = client.get("/local/runs?result=Abandoned").get_data(as_text=True)
     table = table_html(body)
     assert "DEFECT" in table
     assert "IRONCLAD" not in table and "SILENT" not in table
 
-    body = client.get(f"/runs?saves={modded}").get_data(as_text=True)
+    body = client.get(f"/local/runs?saves={modded}").get_data(as_text=True)
     assert "0 runs" in body, "empty modded profile must render, not crash"
 
-    body = client.get("/runs").get_data(as_text=True)
+    body = client.get("/local/runs").get_data(as_text=True)
     assert "3J6ZXDRGZE" in body, "seed column"
     assert '<td class="win">Win</td>' in body and '<td class="loss">Loss</td>' in body
     assert '<td class="abandoned">Abandoned</td>' in body
-    assert "/run/1789424859" in body, "date cell links to the detail page"
+    assert "/local/run/1789424859" in body, "date cell links to the detail page"
 
-    response = client.get("/run/1789424859")
+    response = client.get("/local/run/1789424859")
     assert response.status_code == 200
     body = response.get_data(as_text=True)
     assert "IRONCLAD" in body and "3J6ZXDRGZE" in body
@@ -359,7 +496,7 @@ def check_routes() -> None:
     assert "Byrdonis Egg \u2192 Byrd Swoop" in body and "Rest Site" in body, \
         "relic provenance is visible without cross-referencing the path"
 
-    missing = client.get("/run/9999999999")
+    missing = client.get("/local/run/9999999999")
     assert missing.status_code == 404, "unarchived run must 404"
     assert "not in the archive" in missing.get_data(as_text=True)
 
@@ -370,9 +507,9 @@ def check_missing_saves() -> None:
     original = sts2data.BASE
     sts2data.BASE = Path(tempfile.gettempdir()) / "sts2-definitely-not-here"
     try:
-        client = dashboard.app.test_client()
-        assert "No save data found" in client.get("/").get_data(as_text=True)
-        assert "No save data found" in client.get("/runs").get_data(as_text=True)
+        _app, client = make_client()
+        assert "No save data found" in client.get("/local").get_data(as_text=True)
+        assert "No save data found" in client.get("/local/runs").get_data(as_text=True)
     finally:
         sts2data.BASE = original
     print("no save data    ok")
@@ -388,6 +525,10 @@ def main() -> None:
         try:
             check_loader(archive)
             check_run_detail(archive)
+            check_auth()
+            check_privacy()
+            check_csrf()
+            check_secret_key()
             check_routes()
             check_missing_saves()
         finally:
