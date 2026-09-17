@@ -443,6 +443,68 @@ def check_secret_key() -> None:
     print("secret key      ok")
 
 
+def check_upload_folder() -> None:
+    """Selecting the whole saves folder must work and must be quiet about it."""
+    app, client = make_client("tim")
+
+    run = RUN_FILES["1789424859.run"]
+    base = "saves"
+    # An in-progress run really does look like a finished one: it carries
+    # start_time, players and map_point_history, and has no win field. Left
+    # unfiltered it would be stored as a completed loss.
+    current_run = {k: v for k, v in run.items() if k != "win"}
+    current_run["start_time"] = 1789999999
+
+    folder = [
+        (f"{base}/progress.save", json.dumps(VANILLA_PROGRESS).encode()),
+        (f"{base}/current_run.save", json.dumps(current_run).encode()),
+        (f"{base}/current_run_mp.save", json.dumps(current_run).encode()),
+        (f"{base}/prefs.save", b'{"some":"pref"}'),
+        (f"{base}/settings.save", b'{"some":"setting"}'),
+        (f"{base}/profile.save", b'{"some":"profile"}'),
+        (f"{base}/history/1789424859.run", json.dumps(run).encode()),
+        (f"{base}/history/1789424859.run.backup", json.dumps(run).encode()),
+        (f"{base}/history/1789111111.corrupt", b"garbage"),
+    ]
+    body = client.post(
+        "/upload",
+        data={"files": [(io.BytesIO(b), n) for n, b in folder]},
+        content_type="multipart/form-data",
+    ).get_data(as_text=True)
+
+    with app.app_context():
+        runs = list(db.session.scalars(db.select(Run)))
+        assert len(runs) == 1, [r.start_time for r in runs]
+        assert runs[0].start_time == 1789424859, "only the finished run is stored"
+        assert db.session.scalar(
+            db.select(db.func.count()).select_from(ProgressSnapshot)
+        ) == 1
+        assert not db.session.scalar(
+            db.select(Run).filter_by(start_time=1789999999)
+        ), "current_run.save is an unfinished run and must never be stored"
+
+    summary = re.search(r'<p class="totals">(.*?)</p>', body, re.S).group(1)
+    summary = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", summary)).strip()
+    # 9 files in: one finished run, one progress.save, and seven to ignore.
+    assert "1 added" in summary, summary
+    assert "1 progress file" in summary, summary
+    assert "7 other files ignored" in summary, summary
+    assert "0 rejected" in summary, "a normal save folder must not report errors"
+
+    # classification is by name, so the noise never gets opened at all
+    assert uploads.classify("history/1789424859.run") == uploads.RUN_KIND
+    assert uploads.classify("saves/progress.save") == uploads.PROGRESS_KIND
+    assert uploads.classify("saves/current_run.save") is None
+    assert uploads.classify("saves/current_run_mp.save") is None
+    assert uploads.classify("saves/prefs.save") is None
+    assert uploads.classify("saves/settings.save") is None
+    assert uploads.classify("saves/profile.save") is None
+    assert uploads.classify("history/1789424859.run.backup") is None
+    assert uploads.classify("history/1789111111.corrupt") is None
+
+    print("upload folder   ok")
+
+
 def check_upload() -> None:
     app, client = make_client("tim")
 
@@ -666,6 +728,7 @@ def main() -> None:
             check_csrf()
             check_secret_key()
             check_upload()
+            check_upload_folder()
             check_upload_modded()
             check_upload_privacy()
             check_routes()

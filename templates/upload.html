@@ -9,16 +9,27 @@
       <h2>Choose files</h2>
       <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <label>Run files and progress.save
-          <input type="file" name="files" multiple accept=".run,.save,application/json">
+
+        <label>A whole folder
+          {# webkitdirectory turns the picker into a folder chooser. It has to be
+             its own input: one input cannot offer both files and folders. #}
+          <input type="file" name="files" webkitdirectory directory multiple>
         </label>
+        <p class="note">Pick your <code>saves</code> folder and everything under it
+          is sent. Files that are not run history are ignored.</p>
+
+        <label>Or individual files
+          <input type="file" name="files" multiple accept=".run,.save">
+        </label>
+
         <label class="checkbox">
           <input type="checkbox" name="modded" value="1">
-          These are modded runs
+          Treat all of these as modded runs
         </label>
-        <p class="note">Runs from the game's <code>modded/</code> folder are detected
-          automatically when you select a whole folder. Tick the box if you are
-          selecting individual files from a modded save.</p>
+        <p class="note">Runs under the game's <code>modded/</code> folder are detected
+          from the folder name on their own. Tick the box only when picking
+          individual files, where the browser sends no folder name.</p>
+
         <button type="submit">Upload</button>
       </form>
     </section>
@@ -44,8 +55,12 @@
       {%- if results.progress %} &middot;
         <strong>{{ results.progress }}</strong> progress file{{ '' if results.progress == 1 else 's' }}
       {%- endif %}
+      {%- if results.skipped %} &middot;
+        <span class="note">{{ results.skipped }} other file{{ '' if results.skipped == 1 else 's' }} ignored</span>
+      {%- endif %}
     </p>
 
+    {% if results.rows %}
     <table class="stats">
       <thead><tr><th>file</th><th>outcome</th><th>detail</th></tr></thead>
       <tbody>
@@ -58,5 +73,6 @@
         {% endfor %}
       </tbody>
     </table>
+    {% endif %}
   {% endif %}
 {% endblock %}

@@ -217,10 +217,16 @@ def ingest(files, user, force_modded: bool) -> dict:
             db.select(Run.start_time).filter_by(user_id=user.id)
         ).all()
     )
-    rows, added, duplicate, rejected, progress_saved = [], 0, 0, 0, 0
+    rows, added, duplicate, rejected, progress_saved, skipped = [], 0, 0, 0, 0, 0
 
     for storage in files:
         parsed = uploads.parse_file(storage, force_modded=force_modded)
+
+        if parsed.skipped:
+            # A folder upload sends the whole save directory, most of which is
+            # not run history. Not worth a row each.
+            skipped += 1
+            continue
 
         if not parsed.ok:
             rejected += 1
@@ -272,6 +278,7 @@ def ingest(files, user, force_modded: bool) -> dict:
         "duplicate": duplicate,
         "rejected": rejected,
         "progress": progress_saved,
+        "skipped": skipped,
     }
 
 

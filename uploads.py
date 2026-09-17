@@ -26,6 +26,18 @@ MAX_FILES = 500
 RUN_KIND = "run"
 PROGRESS_KIND = "progress"
 
+# A save folder holds plenty of files that are not run history. current_run.save
+# matters most: it is an in-progress run, and it carries start_time, players and
+# map_point_history, so it would otherwise validate as a finished run and be
+# recorded as a loss. Selecting a whole folder must quietly ignore all of these.
+IGNORED_NAMES = {
+    "current_run.save",
+    "current_run_mp.save",
+    "prefs.save",
+    "profile.save",
+    "settings.save",
+}
+
 # Plausible bounds for a run's start_time, in Unix seconds. Slay the Spire 2
 # did not exist before 2024, and a timestamp far in the future is a corrupt or
 # hand-edited file rather than a real run.
@@ -40,13 +52,14 @@ class ParsedFile:
     filename: str
     kind: str | None = None
     error: str | None = None
+    skipped: str | None = None
     is_modded: bool = False
     data: dict[str, Any] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
-        return self.error is None
+        return self.error is None and self.skipped is None
 
 
 def display_name(filename: str) -> str:
@@ -67,6 +80,23 @@ def is_modded_path(filename: str) -> bool:
     """
     parts = (filename or "").replace("\\", "/").lower().split("/")
     return "modded" in parts[:-1]
+
+
+def classify(filename: str) -> str | None:
+    """Which kind of save file this is, by name, or None to ignore it.
+
+    Uploading a whole folder sends everything in it, so this decides what is
+    worth opening at all. Name alone is enough here and is deliberately strict:
+    contents are still validated afterwards.
+    """
+    name = display_name(filename).lower()
+    if name in IGNORED_NAMES:
+        return None
+    if name.endswith(".run"):
+        return RUN_KIND
+    if name == "progress.save":
+        return PROGRESS_KIND
+    return None
 
 
 def looks_like_progress(filename: str, obj: dict) -> bool:
@@ -144,7 +174,14 @@ def parse_file(storage, force_modded: bool = False) -> ParsedFile:
         is_modded=bool(force_modded) or is_modded_path(filename),
     )
 
-    cap = MAX_PROGRESS_BYTES if filename.lower().endswith(".save") else MAX_RUN_BYTES
+    parsed.kind = classify(filename)
+    if parsed.kind is None:
+        # Not run history. Folder uploads are full of these, so it is not an
+        # error, just nothing to do.
+        parsed.skipped = "not a run or progress file"
+        return parsed
+
+    cap = MAX_PROGRESS_BYTES if parsed.kind == PROGRESS_KIND else MAX_RUN_BYTES
     raw = storage.read(cap + 1)
     if len(raw) > cap:
         parsed.error = f"Larger than the {cap // (1024 * 1024)} MB limit."
@@ -167,11 +204,9 @@ def parse_file(storage, force_modded: bool = False) -> ParsedFile:
         parsed.error = "Not valid JSON."
         return parsed
 
-    if isinstance(obj, dict) and looks_like_progress(filename, obj):
-        parsed.kind = PROGRESS_KIND
+    if parsed.kind == PROGRESS_KIND:
         parsed.error = validate_progress(obj)
     else:
-        parsed.kind = RUN_KIND
         parsed.error = validate_run(obj)
 
     if parsed.ok:
