@@ -1,3 +1,11 @@
+# Slay the Spire 2 stats dashboard
+
+Upload your save files and browse your runs.
+
+[`docs/PLAN.md`](docs/PLAN.md) has the architecture, what each phase did and
+why, the save-file domain knowledge worth not rediscovering, and what is
+planned next. Start there.
+
 # Running
 
 ```bash
