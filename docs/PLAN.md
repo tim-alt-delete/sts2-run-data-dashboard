@@ -64,7 +64,7 @@ GET       /                          logged out: login + register
                                      logged in:  redirect to /u/<you>
 GET       /u/<username>              overview
 GET       /u/<username>/runs         list, filters: character, result, tree
-GET       /u/<username>/run/<id>     detail: path, deck, relics
+GET       /u/<username>/run/<id>     detail: path, deck, card utility, relics
 GET/POST  /upload
 ```
 
@@ -74,7 +74,7 @@ account cannot reach a run by guessing its id.
 
 ### Data storage
 
-MongoDB, database `sts2_dashboard`, in a Docker volume. Three collections:
+MongoDB, database `sts2_dashboard`, in a Docker volume. Four collections:
 
 ```
 users               _id, username, password_hash, created_at, email?
@@ -82,6 +82,8 @@ runs                _id, user_id, start_time, is_modded, uploaded_at, data,
                     + character, result, killed_by, ascension, seed, build,
                       floors, run_time  (extracted at upload time)
 progress_snapshots  _id, user_id, is_modded, uploaded_at, data
+card_stats          _id, user_id, start_time, is_modded, uploaded_at, data,
+                    + complete, seed, mod_version
 ```
 
 `data` is the uploaded file exactly as the game wrote it. The extracted fields
@@ -99,6 +101,7 @@ uniqueness is an integrity guarantee rather than a shape:
 | `runs` | `(user_id, start_time)` unique | re-uploading a save folder is a no-op |
 | `runs` | `(user_id, is_modded)` | per-tree counts, run list, character dropdown |
 | `progress_snapshots` | `(user_id, is_modded)` unique | one snapshot per save tree |
+| `card_stats` | `(user_id, start_time)` unique | one sidecar per run; a re-upload replaces it |
 
 `dashboard/archive/` is an orphan: 8 `.run` files left over from the
 pre-upload flow, gitignored, no longer read or written by any code path. Still
@@ -366,6 +369,52 @@ byte-for-byte, that `uploaded_at` and `created_at` come back timezone-aware,
 and that both unique indexes are enforced by the server rather than only by the
 application.
 
+### Phase 6 — per-card utility (done, `7b25301`)
+
+Ingests the sidecar file written by the **DataExporter mod**, which lives in the
+sibling `DataExporter/` repo. See `DataExporter/docs/PLAN.md` for how the mod
+collects it; this section only covers the dashboard side.
+
+The problem it solves: `.run` files record the final deck but nothing about what
+each card *did*. "Was this card good for this run?" cannot be answered from the
+game's own exports at all, because per-card damage exists only in memory during
+combat.
+
+The mod writes `{start_time}.cardstats.json` into `saves/history/`, beside the
+`.run` file, so an ordinary folder upload picks it up with no extra step.
+
+- `uploads.py` gains `CARDSTATS_KIND` and `validate_cardstats`. The `.cardstats.json`
+  suffix is tested **before** `.run` so a sidecar in the history folder is never
+  mistaken for a run. Counters must be non-negative whole numbers: these are
+  sums, so a negative one means the file is wrong, and clamping it to zero would
+  hide that.
+- `card_stats` is its own collection rather than a field on the run. The mod
+  rewrites the file after every combat, so it routinely arrives **before** the
+  run finishes and must be storable with no run to attach to. `save_card_stats`
+  replaces rather than inserts, because the totals are cumulative and the newest
+  file always supersedes the last.
+- The join happens at render, not at ingest. A sidecar uploaded mid-run simply
+  lights up later when its `.run` arrives.
+- `sts2data.card_stats_table` joins to the final deck on `(card id, upgrade
+  level)`, the same key the mod aggregates by, and adds per-play averages. Raw
+  totals alone are not comparable: a Strike played twelve times and a Bash
+  played twice are different questions.
+
+Rows are sorted in Python, not pandas, deliberately — see [Card table row order
+is not stable](#card-table-row-order-is-not-stable). Verified by rendering one
+run 25 times and checking the order never moved.
+
+**The honest limit.** Damage from Poison, Thorns and relic procs reaches the
+game with no card attached, so the mod cannot attribute it. It goes to an
+`unattributed` bucket which the run page reports as a share of total damage.
+Without that, a damage-over-time deck would read as "my cards did nothing"
+rather than "most of my damage is not attributable". Treat per-card damage as a
+lower bound when that share is large.
+
+Verified against the 8 real archived runs with a sidecar generated from each
+run's real deck: 155 card rows, every one joined to a real deck entry, and the
+per-run row count matching the number of distinct cards in that deck.
+
 ---
 
 ## 5. Future work
@@ -512,8 +561,13 @@ accounts.
   checks: parsing, lifetime totals, derived stats, card stats,
   derived==progress, auth, privacy, csrf, secret key, upload, upload form,
   upload folder, upload modded, upload privacy, run pages, overview page, run
-  pages mod, run pages priv. Any config used to build an app must come from
-  `test_config()`, or the database it creates is never dropped.
+  pages mod, run pages priv, card utility, card utility rej, card utility priv.
+  Any config used to build an app must come from `test_config()`, or the
+  database it creates is never dropped.
+  Note `check_card_stats` and `check_card_utility` are unrelated despite the
+  names: the first is the `card_stats` key inside `progress.save` (lifetime win
+  rates per card), the second is the DataExporter sidecar (what a card did in
+  one run).
 - **Verification**: changes are checked against the 8 real archived runs, not
   only fixtures. Several real bugs were caught that way.
 - **Phases**: built one at a time, each verified, committed and pushed, with a

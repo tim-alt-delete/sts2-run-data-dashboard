@@ -34,6 +34,23 @@ are matched on start time and skipped.
 Data lives in the `sts2_dashboard` database, in the container's `mongo-data`
 volume. `docker compose down` keeps it; `docker compose down -v` deletes it.
 
+## Per-card statistics
+
+The game's `.run` files record the final deck but nothing about what each card
+actually did, so "was this card good for this run?" cannot be answered from
+them. The **DataExporter mod**, in the sibling `DataExporter/` repo, records
+damage, block, energy and draws per card while you play and writes a
+`{start_time}.cardstats.json` beside each `.run` file.
+
+Nothing extra is needed to use it: the sidecar sits in the same `saves/history/`
+folder, so the upload above collects it, and a **Card utility** table appears on
+that run's detail page. Runs without one render exactly as before.
+
+Damage from Poison, Thorns and relics arrives with no card attached to it, so it
+cannot be credited to one. That amount is reported separately as *unattributed*
+rather than hidden — when it is a large share of the total, read the per-card
+damage as a lower bound.
+
 ## Storage
 
 Runs are stored as the game exported them. A `.run` file is JSON, so it goes
@@ -49,7 +66,7 @@ idempotent.
 
 What *is* declared is the set of indexes, in `db.py`. They are created on every
 start and enforce the guarantees the app depends on: one account per username,
-one run per (user, start time).
+one run per (user, start time), one card stats sidecar per run.
 
 ## Outside local development
 
