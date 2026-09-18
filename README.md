@@ -13,6 +13,8 @@ cd ~/slay-the-spire-mod/dashboard
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
+docker compose up -d                # MongoDB on 127.0.0.1:27017
+
 python test_dashboard.py            # self-check, no game install needed
 
 export FLASK_DEBUG=1                # local development
@@ -29,20 +31,25 @@ Selecting `steam/<id>` instead picks up every profile at once, vanilla and
 modded, each tagged correctly. Uploading the same runs again is harmless; they
 are matched on start time and skipped.
 
-The database is SQLite at `instance/app.db`, created on first start.
+Data lives in the `sts2_dashboard` database, in the container's `mongo-data`
+volume. `docker compose down` keeps it; `docker compose down -v` deletes it.
 
-## Schema changes
+## Storage
 
-There are no migrations yet. `create_all()` only creates missing tables, so if
-a column is added to a model the app refuses to start against an older
-database and tells you what is missing. Delete it and upload again:
+Runs are stored as the game exported them. A `.run` file is JSON, so it goes
+into MongoDB unchanged, alongside a handful of fields pulled out of it
+(character, result, ascension and so on) that let the run list sort and filter
+without opening the blob.
 
-```bash
-rm instance/app.db
-```
+There are no migrations, and none are needed for the uploaded data: if a game
+update adds, renames or removes a field, old and new documents simply differ
+and both keep working. Only the extracted fields are the app's own invention,
+and changing those means re-uploading, which is free because uploads are
+idempotent.
 
-Alembic becomes worth adding once a database holds data that cannot simply be
-re-uploaded.
+What *is* declared is the set of indexes, in `db.py`. They are created on every
+start and enforce the guarantees the app depends on: one account per username,
+one run per (user, start time).
 
 ## Outside local development
 
@@ -54,8 +61,10 @@ export SECRET_KEY=$(python -c 'import secrets; print(secrets.token_hex(32))')
 ```
 
 Serving over HTTPS also requires `SESSION_COOKIE_SECURE=1` so session cookies
-are never sent in the clear. `DATABASE_URL` overrides the SQLite default when
-moving to Postgres.
+are never sent in the clear. `MONGODB_URI` and `MONGODB_DB` point the app at a
+different server or database; the compose file has no authentication and
+publishes only on `127.0.0.1`, so anything beyond local development needs
+credentials in the URI.
 
 Still to do before exposing this publicly: TLS termination, a production WSGI
 server, and rate limiting on the login and registration routes.

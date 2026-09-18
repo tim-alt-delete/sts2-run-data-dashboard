@@ -34,6 +34,7 @@ trustworthy later. Anything that presents a rate should show its sample size.
 ```bash
 cd ~/slay-the-spire-mod/dashboard
 source .venv/bin/activate
+docker compose up -d                # MongoDB; the self-check needs it too
 python test_dashboard.py            # self-check, no game install needed
 export FLASK_DEBUG=1
 flask --app app run --debug         # http://127.0.0.1:5000
@@ -45,10 +46,12 @@ flask --app app run --debug         # http://127.0.0.1:5000
 |---|---|
 | `app.py` | `create_app` factory, auth routes, per-user routes, upload ingest |
 | `config.py` | env-driven config, `SECRET_KEY` guard, cookie flags |
-| `models.py` | `User`, `Run`, `ProgressSnapshot`, password hashing, validation |
+| `db.py` | MongoDB client, per-app database handle, index setup |
+| `models.py` | `User`, password hashing, validation, and every query |
 | `uploads.py` | parsing and validation of untrusted uploaded files |
 | `sts2data.py` | pure parsing of save data into DataFrames; no filesystem access |
 | `test_dashboard.py` | the whole self-check suite, run directly, no pytest |
+| `docker-compose.yml` | MongoDB for local development |
 | `templates/` | `base`, `index`, `overview`, `runs`, `run`, `upload` |
 | `docs/PLAN.md` | this file |
 
@@ -71,13 +74,69 @@ account cannot reach a run by guessing its id.
 
 ### Data storage
 
-Runs live **only** in the database, in `runs.data` (a JSON column) plus
-extracted metadata columns for sorting and filtering. SQLite at
-`instance/app.db`, gitignored.
+MongoDB, database `sts2_dashboard`, in a Docker volume. Three collections:
+
+```
+users               _id, username, password_hash, created_at, email?
+runs                _id, user_id, start_time, is_modded, uploaded_at, data,
+                    + character, result, killed_by, ascension, seed, build,
+                      floors, run_time  (extracted at upload time)
+progress_snapshots  _id, user_id, is_modded, uploaded_at, data
+```
+
+`data` is the uploaded file exactly as the game wrote it. The extracted fields
+beside it exist so the run list can sort and filter without loading a 12-83 KB
+blob per row; they are always fetched with an explicit projection, because
+without one MongoDB returns the blob too.
+
+There is no declared schema. There **are** declared indexes, in `db.py`, since
+uniqueness is an integrity guarantee rather than a shape:
+
+| Collection | Index | Why |
+|---|---|---|
+| `users` | `username` unique | one account per name |
+| `users` | `email` unique, **partial** on `{"email": {"$type": "string"}}` | email is optional; a plain unique index would make every account without one a duplicate of the first |
+| `runs` | `(user_id, start_time)` unique | re-uploading a save folder is a no-op |
+| `runs` | `(user_id, is_modded)` | per-tree counts, run list, character dropdown |
+| `progress_snapshots` | `(user_id, is_modded)` unique | one snapshot per save tree |
 
 `dashboard/archive/` is an orphan: 8 `.run` files left over from the
 pre-upload flow, gitignored, no longer read or written by any code path. Still
-useful as a cold backup of runs the game may have since pruned.
+useful as a cold backup of runs the game may have since pruned, and the
+verification data for every change (see Conventions).
+
+### Why MongoDB
+
+Phases 1-4 used SQLite through Flask-SQLAlchemy. The game exports JSON, so that
+meant a JSON column SQLite stores as opaque TEXT: unqueryable, unindexable, and
+recomputed in Python on every request. Meanwhile the declared columns needed a
+migration story that did not exist — `create_all()` never alters a table, so
+adding one meant `rm instance/app.db` and re-uploading.
+
+Storing the export as documents removes the second problem outright: a game
+update that adds or renames a field costs nothing, because nothing declares
+what a run looks like. It also unblocks the first, since the run JSON is now
+reachable from a query rather than only from Python.
+
+What it cost:
+
+- **A daemon.** SQLite was a file; MongoDB is a service, hence
+  `docker-compose.yml` and a real server for the self-check.
+- **Transactions.** A standalone mongod has no multi-document transactions, so
+  `ingest()` is one `insert_many` rather than one commit and a batch is not
+  atomic. Acceptable because uploading is idempotent: re-uploading repairs a
+  partial batch.
+- **Cascade delete.** `ON DELETE CASCADE` has no equivalent; deleting a user
+  would have to delete their runs explicitly. No such code path exists yet.
+  (SQLite was not enforcing it either — nothing set `PRAGMA foreign_keys=ON`.)
+
+Not carried over: PyMongo is used directly rather than through an ODM, because
+an ODM re-declares the shape of every document, which is the thing this change
+exists to avoid.
+
+Verified by rendering all 14 pages from the 8 real archived runs under both
+backends and diffing: identical content. (Card table *row order* differs run to
+run under both, which is a pre-existing wrinkle — see Future work.)
 
 ---
 
@@ -217,7 +276,7 @@ same-site paths.
 
 `app.py` became a `create_app` factory. Flask's CLI discovers it automatically,
 and importing the module has no side effects, which is what lets tests build an
-app with an in-memory database.
+app with a throwaway database.
 
 ### Phase 2 — uploads (done, `ce1a57e`, `4da3a4a`, `3cac72c`)
 
@@ -242,9 +301,10 @@ local-file routes were removed, and `sts2data.py` lost everything touching the
 filesystem — it now takes an already-decoded dict and does not care where it
 came from. Net −241 lines.
 
-A `killed_by` column was added rather than derived, so the list page does not
+A `killed_by` field was added rather than derived, so the list page does not
 have to load every run's JSON blob to render one cell. That exposed the
-migration gap and prompted the startup schema check (see below).
+migration gap and prompted a startup schema check — both since removed by
+phase 5, which is largely what motivated it.
 
 Modded runs are hidden by default, with filters to isolate or combine them.
 
@@ -272,6 +332,39 @@ Known ceiling: the overview loads every run's JSON on each request to rebuild
 the aggregates. Fine for hundreds of runs, wasteful for many thousands. See
 [Cache the overview aggregates](#cache-the-overview-aggregates) under future
 work.
+
+### Phase 5 — MongoDB (done, `f846014`)
+
+SQLite and Flask-SQLAlchemy replaced with MongoDB and PyMongo. Rationale and
+costs are in [Why MongoDB](#why-mongodb) under Current state; the short version
+is that the game exports JSON and SQLite could only store that as opaque text.
+
+`models.py` no longer declares any table. It keeps `User` — Flask-Login needs
+an object with an identity — plus password hashing, the username and password
+rules, and every query in the app. `db.py` is new and holds the client and the
+indexes. `app.py` lost `check_schema()` and its inner `tree_filter()`, and its
+routes now call named functions instead of building queries inline.
+
+`ingest()` batches into one `insert_many` instead of one commit, and reports
+anything the unique index rejects as the duplicate it is, which covers two
+uploads racing for the same run.
+
+`uploads.py` gained a guard rejecting field names containing `.` or starting
+with `$`. Nothing the game exports uses one today — 115 distinct keys across
+the archived runs, none affected — but storing the export verbatim is the whole
+point, and a game update is exactly what would introduce one.
+
+Testing changed shape: MongoDB has no in-memory mode, so the self-check needs a
+running server. Each check gets a uniquely-named database, dropped in a
+`finally` so a failed run leaves nothing behind, and `main()` pings first so an
+unreachable server prints an instruction instead of a driver traceback.
+
+Verified by rendering all 14 pages from the 8 real archived runs and the real
+`progress.save` under both backends and diffing: identical content. Separately
+checked that all 8 run files and the 231-card `progress.save` round-trip
+byte-for-byte, that `uploaded_at` and `created_at` come back timezone-aware,
+and that both unique indexes are enforced by the server rather than only by the
+application.
 
 ---
 
@@ -301,38 +394,60 @@ Options, roughly in order of effort:
    multi-process. Invalidation is trivial because nothing mutates a stored run.
 2. **Precompute on upload.** Ingest already touches every run it stores, so the
    per-run contribution to each aggregate could be derived there and kept in a
-   summary table. Turns page load into a cheap `GROUP BY`. More moving parts,
-   and a schema change, so it wants migrations in place first.
-3. **Push the simple parts into SQL.** Totals and most of the character table
-   only need the metadata columns that already exist, so they could be a single
-   aggregate query today. Only the card table genuinely needs the JSON, since
-   card counts come from deck contents and reward screens.
+   summary collection. Turns page load into a cheap grouped query. More moving
+   parts, but no longer blocked on migrations: a new collection or a new field
+   on an existing document needs no schema change.
+3. **Push the work into an aggregation pipeline.** Totals and most of the
+   character table only need the extracted fields, so they are a single `$group`
+   today. The card table needs the run JSON — but the JSON is now *in* the
+   database rather than an opaque blob, so `$unwind` over `map_point_history`
+   and `players.deck` can do the counting server-side instead of shipping every
+   blob to Python.
 
-Option 3 is the cheapest real win and needs no new storage: it would leave the
-JSON blobs untouched for everything except the card table. Option 1 is the
-smallest change overall. Option 2 is the right end state but should wait for
-migrations.
+Option 3 is the biggest win and the storage change is what unlocked it: under
+SQLite the card table could not have been expressed this way at all. Option 1
+is still the smallest change. Option 2 is the right end state and is no longer
+gated on anything.
 
 Worth doing when a page load becomes noticeable, or before opening the app to
 other users, since the cost is per-user and concurrent.
 
+### Card table row order is not stable
+
+**Status: pre-existing, cosmetic, cheap to fix.**
+
+`card_table` in `sts2data.py` iterates `set(won) | set(lost) | ...` and then
+sorts with pandas' default non-stable quicksort. Rows that tie on both
+`win_rate` and `runs` therefore come out in a different order on each process,
+because Python randomises string hashing per process.
+
+Caught while diffing old and new storage backends: the two differed, and then
+the old backend differed from *itself* across two runs by the same amount. So
+it is not a storage bug. Fix is `sorted(...)` over the union plus
+`kind="stable"` in `sort_values`. Same for `relic_table` if it shares the
+pattern.
+
 ### Database migrations
 
-**Status: deferred, has a known trap.**
+**Status: mostly moot, deliberately.**
 
-`db.create_all()` creates missing tables but never alters existing ones. A
-column added to a model is silently absent until the table is rebuilt, and the
-first query dies with a bare `no such column`.
+Nothing declares the shape of a stored document, so a game update that adds,
+renames or removes a field needs no migration: old and new documents differ and
+both keep working. `check_schema()` and the `rm instance/app.db` ritual are
+gone.
 
-`check_schema()` in `app.py` compares each model against the real table at
-startup and raises an actionable error naming the missing columns. The current
-fix is `rm instance/app.db` and re-upload, which is acceptable only because
-uploads are idempotent and the data is small.
+Two things could still need a data change:
 
-Alembic becomes worth adding when a database holds data that cannot simply be
-re-uploaded — realistically once there is more than one user, or once anything
-is derived and stored rather than uploaded. At that point `check_schema()` can
-either go away or become a "migrations pending" check.
+- The fields extracted from each run at upload time (`character`, `result`, and
+  so on) are the app's own invention. Changing how one is derived means
+  rewriting it across existing documents, or re-uploading, which is free while
+  uploads remain idempotent and the archive is intact.
+- Indexes in `db.py` are created on every start. `create_index` is idempotent,
+  but *removing* one is not — a dropped index has to be dropped by hand.
+
+A real migration tool is worth it once documents hold anything derived and
+stored rather than uploaded, since that is the point at which re-uploading
+stops being a complete repair.
 
 ### pandas
 
@@ -357,16 +472,23 @@ a large dependency; keeping it costs nothing but import time.
 
 ### Deployment
 
-Deliberately deferred; none of it constrains the schema or code shape.
+Deliberately deferred; none of it constrains the document shape or code shape.
 
 - TLS termination
 - production WSGI server (gunicorn)
 - rate limiting on `/login` and `/register` (`Flask-Limiter`)
 - `SESSION_COOKIE_SECURE=1`
-- Postgres via `DATABASE_URL`; `JSON` columns map to `jsonb`
+- a MongoDB with authentication, via credentials in `MONGODB_URI`. The compose
+  file has none and publishes only on `127.0.0.1`, which is fine for a laptop
+  and not for anything else.
+- backups. SQLite was one file to copy; this needs `mongodump` on a timer.
+
+One trap worth recording: `MongoClient` must be created after a fork, and
+`create_app()` runs in the worker, so plain gunicorn is fine but
+`gunicorn --preload` would share a client across workers and misbehave.
 
 Out of scope until asked: password reset and email verification. The optional
-`email` column exists so this can be added later without chasing existing
+`email` field exists so this can be added later without chasing existing
 accounts.
 
 ### Other ideas raised but not scheduled
@@ -383,14 +505,15 @@ accounts.
 
 - **Commits**: lowercase conventional style (`feat:`, `fix:`, `refactor:`).
   Body explains reasoning and any non-obvious constraint discovered.
-  Author is `Timothy Pulliam <contact@timothypulliam.com>`; there is no git
-  identity configured in the sandbox, so it is passed per-commit via
-  `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` env vars.
+  Author is `Timothy Pulliam <contact@timothypulliam.com>`, from the git
+  identity configured globally in this environment.
 - **Tests**: `python test_dashboard.py`, no pytest, no fixtures framework.
-  Every check prints `name ok`. Current checks: parsing, lifetime totals,
-  derived stats, card stats, derived==progress, auth, privacy, csrf, secret
-  key, upload, upload form, upload folder, upload modded, upload privacy, run
-  pages, overview page, run pages mod, run pages priv.
+  Needs `docker compose up -d` first. Every check prints `name ok`. Current
+  checks: parsing, lifetime totals, derived stats, card stats,
+  derived==progress, auth, privacy, csrf, secret key, upload, upload form,
+  upload folder, upload modded, upload privacy, run pages, overview page, run
+  pages mod, run pages priv. Any config used to build an app must come from
+  `test_config()`, or the database it creates is never dropped.
 - **Verification**: changes are checked against the 8 real archived runs, not
   only fixtures. Several real bugs were caught that way.
 - **Phases**: built one at a time, each verified, committed and pushed, with a
