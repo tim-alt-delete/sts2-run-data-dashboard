@@ -1085,6 +1085,64 @@ def check_upload_modded() -> None:
     print("upload modded   ok")
 
 
+def check_field_names() -> None:
+    """Field names mods produce, which are not the ones the game produces.
+
+    BaseLib writes `save_dict_List[BaseLib.Abstracts.CardModifier+ModifierSave]`
+    onto every card, so every run recorded alongside any BaseLib-dependent mod
+    carries dots in its field names. Rejecting those made such runs impossible
+    to upload at all, with an error the uploader could do nothing about.
+
+    MongoDB has stored dots and dollar signs in field names since 5.0. The only
+    name BSON genuinely refuses is one containing a NUL byte.
+    """
+    app, client = make_client("tim")
+    modifier_key = "save_dict_List[BaseLib.Abstracts.CardModifier+ModifierSave]"
+
+    run = json.loads(json.dumps(RUN_FILES["1789424859.run"]))
+    for card in run["players"][0]["deck"]:
+        card[modifier_key] = {"BaseLibCardModifiers": []}
+    # The dangerous-looking shapes too, to pin down that storing them is inert.
+    run["players"][0]["deck"][0]["$ne"] = {"a.b": [{"$where": "1"}]}
+
+    body = client.post(
+        "/upload",
+        data={"files": [(io.BytesIO(json.dumps(run).encode()), "1789424859.run")]},
+        content_type="multipart/form-data",
+    ).get_data(as_text=True)
+    assert "1 added" in text_of(body), text_of(body)[-400:]
+
+    # Stored verbatim: the point of this design is that the export survives.
+    with app.app_context():
+        stored = db.runs().find_one()["data"]
+    assert stored == run, "a run with dotted field names must round-trip unchanged"
+    assert modifier_key in stored["players"][0]["deck"][0]
+    assert stored["players"][0]["deck"][0]["$ne"] == {"a.b": [{"$where": "1"}]}
+
+    # And the page that reads it still works, since those keys are just ignored.
+    page = client.get("/u/tim/run/1789424859").get_data(as_text=True)
+    assert "IRONCLAD" in page and "Strike Ironclad" in text_of(page)
+
+    # A NUL byte is the one thing BSON really refuses, so it is caught before
+    # the write rather than surfacing as a driver error.
+    assert uploads.unstorable_key({"a\x00b": 1}) == "a\x00b"
+    assert uploads.unstorable_key({"ok": [{modifier_key: 1}, {"$ne": 2}]}) is None
+    assert uploads.unstorable_key({"deep": [[{"x": {"y\x00": 1}}]]}) == "y\x00"
+
+    nul = json.loads(json.dumps(RUN_FILES["1789508732.run"]))
+    nul["players"][0]["a\x00b"] = 1
+    body = client.post(
+        "/upload",
+        data={"files": [(io.BytesIO(json.dumps(nul).encode()), "1789508732.run")]},
+        content_type="multipart/form-data",
+    ).get_data(as_text=True)
+    assert "NUL byte" in body, text_of(body)[-400:]
+    with app.app_context():
+        assert db.runs().count_documents({}) == 1, "the rejected run must not be stored"
+
+    print("field names     ok")
+
+
 def check_upload_privacy() -> None:
     app, client = make_client("tim")
     client.post(
@@ -1127,6 +1185,7 @@ def main() -> None:
         check_upload_form()
         check_upload_folder()
         check_upload_modded()
+        check_field_names()
         check_upload_privacy()
         check_run_pages()
         check_overview_page()

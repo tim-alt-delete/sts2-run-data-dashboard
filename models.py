@@ -18,6 +18,13 @@ Document shapes, for reference rather than enforcement:
     progress_snapshots  _id, user_id, is_modded, uploaded_at, data
     card_stats          _id, user_id, start_time, is_modded, uploaded_at, data,
                         complete, seed, mod_version
+
+`data` holds the uploaded file verbatim, including field names containing dots
+and dollar signs, which mods do produce. Storing those is safe; querying with
+them would not be. **Never build a query from a key or a value inside `data`.**
+It is attacker-controlled, so a field name like `$ne` becomes injection the
+moment it reaches a query document. `data` is read as a whole blob and never
+filtered or indexed on. Keep it that way, or restore a guard in uploads.py.
 """
 
 from __future__ import annotations

@@ -252,16 +252,29 @@ def cardstats_metadata(obj: dict) -> dict[str, Any]:
     }
 
 
-def unsafe_key(obj: Any) -> str | None:
-    """The first field name MongoDB cannot store comfortably, or None.
+def unstorable_key(obj: Any) -> str | None:
+    """The first field name MongoDB genuinely cannot store, or None.
 
-    A key containing a dot, or starting with a dollar, collides with MongoDB's
-    query syntax and is painful to read back even where the server accepts it.
-    Nothing the game exports today uses one -- 115 distinct keys across the
-    archived runs, none of them affected -- but storing the export verbatim is
-    the whole point of this design, and a game update is exactly what would
-    introduce one. Catching it here turns a driver error deep inside a write
-    into an actionable line on the upload page.
+    That set is very small: a NUL byte in a key, which BSON rejects outright.
+    Dots and dollar signs are fine. MongoDB has accepted both in stored field
+    names since 5.0, and `docker-compose.yml` pins a far later version.
+
+    This used to reject dots and leading dollars as well, on the theory that
+    they collide with query syntax. They do -- but only when a field name is
+    used as a *query path*, and nothing here ever does that (see the warning
+    below). The cost of that caution turned out to be total: BaseLib writes
+    `save_dict_List[BaseLib.Abstracts.CardModifier+ModifierSave]` onto every
+    single card, so every run recorded with any BaseLib-dependent mod was
+    refused, with an error the uploader had no way to act on. Rejecting a
+    whole run to avoid a problem the storage layer does not have is the worse
+    trade.
+
+    WARNING, and the reason the relaxation is safe: **never build a MongoDB
+    query from a key or a value inside `data`.** Everything in there is
+    attacker-controlled, and a field name like `$where` or `$ne` is only
+    dangerous once it is interpolated into a query document. Storing it is
+    inert; querying with it is injection. `data` is read as a whole blob and
+    never indexed or filtered on, and that must stay true.
 
     Iterative rather than recursive: the input is attacker-supplied and deep
     nesting should not cost a stack frame per level.
@@ -271,7 +284,7 @@ def unsafe_key(obj: Any) -> str | None:
         current = stack.pop()
         if isinstance(current, dict):
             for key, value in current.items():
-                if "." in key or key.startswith("$"):
+                if "\x00" in key:
                     return key
                 stack.append(value)
         elif isinstance(current, list):
@@ -344,11 +357,11 @@ def parse_file(storage, force_modded: bool = False) -> ParsedFile:
         parsed.error = validate_run(obj)
 
     if parsed.ok:
-        bad = unsafe_key(obj)
+        bad = unstorable_key(obj)
         if bad is not None:
             parsed.error = (
                 f"Field name {bad!r} cannot be stored: names must not contain "
-                f"'.' or start with '$'."
+                f"a NUL byte."
             )
             return parsed
         parsed.data = obj
