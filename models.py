@@ -1,22 +1,58 @@
-"""Database models.
+"""Documents and the queries over them.
 
-SQLAlchemy is used rather than raw sqlite3 so the eventual move to Postgres is
-a connection-string change instead of a query rewrite.
+MongoDB is used rather than a relational store because the game already exports
+JSON. A run is kept exactly as the game wrote it, so a game update that adds,
+renames or removes a field needs no migration and loses nothing.
+
+Only User gets a class, because Flask-Login needs an object with an identity.
+Runs and progress snapshots are plain dicts: the same dicts uploads.py
+validated and sts2data.py knows how to read. Every query lives here rather
+than in the routes, so there is one place to look when the document shape or
+an index changes.
+
+Document shapes, for reference rather than enforcement:
+
+    users               _id, username, password_hash, created_at, email?
+    runs                _id, user_id, start_time, is_modded, uploaded_at, data,
+                        and the extracted fields in RUN_LIST_FIELDS
+    progress_snapshots  _id, user_id, is_modded, uploaded_at, data
 """
 
 from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from typing import Any
 
+from bson import ObjectId
+from bson.errors import InvalidId
 from flask_login import UserMixin
-from flask_sqlalchemy import SQLAlchemy
+from pymongo import DESCENDING
+from pymongo.errors import BulkWriteError
 from werkzeug.security import check_password_hash, generate_password_hash
 
-db = SQLAlchemy()
+import db
 
 USERNAME_PATTERN = re.compile(r"^[a-z0-9_-]{3,32}$")
 MIN_PASSWORD_LENGTH = 8
+
+# The fields extracted from a run at upload time, so the run list can sort and
+# filter without opening the JSON blob. They are always projected explicitly:
+# without a projection MongoDB would ship every `data` blob to render a table
+# that never looks at one.
+RUN_LIST_FIELDS = (
+    "start_time",
+    "character",
+    "ascension",
+    "result",
+    "killed_by",
+    "build",
+    "floors",
+    "seed",
+    "is_modded",
+)
+
+DUPLICATE_KEY = 11000
 
 
 def now() -> datetime:
@@ -47,102 +83,205 @@ def password_error(password: str) -> str | None:
     return None
 
 
-class User(db.Model, UserMixin):
-    __tablename__ = "users"
+# --------------------------------------------------------------------------
+# users
+# --------------------------------------------------------------------------
 
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(32), unique=True, nullable=False, index=True)
-    # Optional, and no mail is ever sent. It exists so password reset can be
-    # added later without having to chase existing accounts for an address.
-    email = db.Column(db.String(255), unique=True, nullable=True)
-    password_hash = db.Column(db.String(255), nullable=False)
-    created_at = db.Column(db.DateTime, nullable=False, default=now)
 
-    def set_password(self, password: str) -> None:
-        """Hashed with scrypt, werkzeug's default. The plaintext is never stored."""
-        self.password_hash = generate_password_hash(password)
+class User(UserMixin):
+    """An account, wrapping its document.
+
+    The document's `_id` is an ObjectId and never appears in a URL: pages are
+    addressed by username, and runs by their start time. It only travels in the
+    session cookie, via get_id().
+    """
+
+    def __init__(self, doc: dict[str, Any]):
+        self.doc = doc
+        self.id = doc["_id"]
+        self.username = doc["username"]
+        # Optional, and no mail is ever sent. It exists so password reset can be
+        # added later without having to chase existing accounts for an address.
+        self.email = doc.get("email")
+        self.password_hash = doc["password_hash"]
+        self.created_at = doc.get("created_at")
+
+    def get_id(self) -> str:
+        """Flask-Login keeps this in the session and hands it back as a string."""
+        return str(self.id)
 
     def check_password(self, password: str) -> bool:
         return check_password_hash(self.password_hash, password or "")
 
     @staticmethod
     def by_username(username: str) -> "User | None":
-        return db.session.scalar(
-            db.select(User).filter_by(username=normalize_username(username))
-        )
+        doc = db.users().find_one({"username": normalize_username(username)})
+        return User(doc) if doc else None
+
+    @staticmethod
+    def by_id(user_id: str) -> "User | None":
+        """Look up by the string Flask-Login took from the session.
+
+        The value is attacker-controlled in the sense that a tampered cookie
+        can carry anything, so a malformed id is a miss rather than a crash.
+        """
+        try:
+            oid = ObjectId(user_id)
+        except (InvalidId, TypeError):
+            return None
+        doc = db.users().find_one({"_id": oid})
+        return User(doc) if doc else None
 
     def __repr__(self) -> str:
         return f"<User {self.username}>"
 
 
-class Run(db.Model):
-    """One finished run, as uploaded.
+def create_user(username: str, email: str | None, password: str) -> User:
+    """Register an account. The plaintext password is never stored."""
+    doc: dict[str, Any] = {
+        "username": normalize_username(username),
+        # scrypt, werkzeug's default.
+        "password_hash": generate_password_hash(password),
+        "created_at": now(),
+    }
+    # Absent, not null. The unique index on email only covers documents whose
+    # email is a string, so storing an explicit null for every account without
+    # one would make the second such account a duplicate of the first.
+    if email:
+        doc["email"] = email
+    result = db.users().insert_one(doc)
+    doc.setdefault("_id", result.inserted_id)
+    return User(doc)
 
-    The raw file is kept in `data` so every parser in sts2data keeps working
-    unchanged, and so nothing is lost if more columns are wanted later. The
-    other columns exist to sort and filter without opening the JSON.
+
+def email_taken(email: str) -> bool:
+    return db.users().find_one({"email": email}, {"_id": 1}) is not None
+
+
+# --------------------------------------------------------------------------
+# runs
+# --------------------------------------------------------------------------
+
+
+def tree_query(tree: str) -> dict[str, Any]:
+    """Modded runs are kept out of the numbers unless asked for."""
+    if tree == "modded":
+        return {"is_modded": True}
+    if tree == "all":
+        return {}
+    return {"is_modded": False}
+
+
+def run_counts_by_tree(user_id: ObjectId) -> dict[bool, int]:
+    """How many runs the user has in each save tree."""
+    runs = db.runs()
+    return {
+        False: runs.count_documents({"user_id": user_id, "is_modded": False}),
+        True: runs.count_documents({"user_id": user_id, "is_modded": True}),
+    }
+
+
+def run_data_for_user(user_id: ObjectId, tree: str) -> list[dict]:
+    """Every raw run file for a tree, for the aggregates to be rebuilt from.
+
+    This is the expensive query: it loads one 12-83 KB blob per run on each
+    overview render. Fine for hundreds of runs, wasteful for many thousands.
+    See the overview caching note in docs/PLAN.md.
     """
-
-    __tablename__ = "runs"
-    __table_args__ = (
-        # The game names each file after its start_time, so re-uploading a save
-        # folder is a no-op rather than a pile of duplicates.
-        db.UniqueConstraint("user_id", "start_time", name="uq_runs_user_start"),
-        db.Index("ix_runs_user_start", "user_id", "start_time"),
+    cursor = db.runs().find(
+        {"user_id": user_id, **tree_query(tree)}, {"data": 1, "_id": 0}
     )
-
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(
-        db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
-    start_time = db.Column(db.Integer, nullable=False)
-
-    character = db.Column(db.String(64))
-    result = db.Column(db.String(16))
-    killed_by = db.Column(db.String(64))
-    ascension = db.Column(db.Integer)
-    seed = db.Column(db.String(32))
-    build = db.Column(db.String(32))
-    floors = db.Column(db.Integer)
-    run_time = db.Column(db.Integer)
-
-    # A .run file carries no modded flag, so this comes from the upload: either
-    # the folder path the browser reported, or the checkbox on the form.
-    is_modded = db.Column(db.Boolean, nullable=False, default=False)
-
-    data = db.Column(db.JSON, nullable=False)
-    uploaded_at = db.Column(db.DateTime, nullable=False, default=now)
-
-    user = db.relationship("User", backref=db.backref("runs", passive_deletes=True))
-
-    def __repr__(self) -> str:
-        return f"<Run {self.start_time} {self.character} {self.result}>"
+    return [doc["data"] for doc in cursor]
 
 
-class ProgressSnapshot(db.Model):
-    """The latest progress.save for a user, kept per save tree.
+def run_rows(
+    user_id: ObjectId, tree: str, character: str = "", result: str = ""
+) -> list[dict]:
+    """The run list, newest first, without touching any JSON blob."""
+    query: dict[str, Any] = {"user_id": user_id, **tree_query(tree)}
+    if character:
+        query["character"] = character
+    if result:
+        query["result"] = result
+
+    projection: dict[str, Any] = {field: 1 for field in RUN_LIST_FIELDS}
+    projection["_id"] = 0
+    return list(db.runs().find(query, projection).sort("start_time", DESCENDING))
+
+
+def distinct_characters(user_id: ObjectId, tree: str) -> list[str]:
+    """Characters the user has played, for the filter dropdown."""
+    values = db.runs().distinct("character", {"user_id": user_id, **tree_query(tree)})
+    return sorted(c for c in values if c)
+
+
+def find_run(user_id: ObjectId, start_time: int) -> dict | None:
+    """One run, scoped to its owner so a run cannot be reached by guessing an id."""
+    return db.runs().find_one({"user_id": user_id, "start_time": start_time})
+
+
+def existing_start_times(user_id: ObjectId) -> set[int]:
+    """Which runs the user already has, so a re-upload can be recognised."""
+    return set(db.runs().distinct("start_time", {"user_id": user_id}))
+
+
+def run_document(
+    user_id: ObjectId, is_modded: bool, data: dict, metadata: dict[str, Any]
+) -> dict[str, Any]:
+    """Build a run document from a validated upload."""
+    return {
+        "user_id": user_id,
+        "is_modded": is_modded,
+        "uploaded_at": now(),
+        "data": data,
+        **metadata,
+    }
+
+
+def insert_runs(docs: list[dict]) -> set[int]:
+    """Insert prepared run documents, reporting any the database already had.
+
+    Unordered so one rejected document does not abandon the rest. The caller
+    has already filtered out runs it knows about; this catches the case where
+    the same run arrives from two uploads at once, which the unique index on
+    (user_id, start_time) turns into a duplicate-key error rather than a
+    second copy.
+    """
+    if not docs:
+        return set()
+    try:
+        db.runs().insert_many(docs, ordered=False)
+    except BulkWriteError as exc:
+        duplicates = set()
+        for error in exc.details.get("writeErrors", []):
+            if error.get("code") != DUPLICATE_KEY:
+                # Anything other than "already there" is a real failure.
+                raise
+            duplicates.add(error["op"]["start_time"])
+        return duplicates
+    return set()
+
+
+# --------------------------------------------------------------------------
+# progress snapshots
+# --------------------------------------------------------------------------
+
+
+def progress_snapshot(user_id: ObjectId, is_modded: bool) -> dict | None:
+    """The latest progress.save for a save tree, or None.
 
     Runs are authoritative for every statistic. This exists to show lifetime
     totals, including runs the game has already pruned from its 100-file
     history, and so the gap between the two can be reported.
     """
-
-    __tablename__ = "progress_snapshots"
-    __table_args__ = (
-        db.UniqueConstraint("user_id", "is_modded", name="uq_progress_user_modded"),
+    return db.progress_snapshots().find_one(
+        {"user_id": user_id, "is_modded": is_modded}
     )
 
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(
-        db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
-    is_modded = db.Column(db.Boolean, nullable=False, default=False)
-    data = db.Column(db.JSON, nullable=False)
-    uploaded_at = db.Column(db.DateTime, nullable=False, default=now)
 
-    user = db.relationship(
-        "User", backref=db.backref("progress_snapshots", passive_deletes=True)
+def save_progress_snapshot(user_id: ObjectId, is_modded: bool, data: dict) -> None:
+    """Store the snapshot for a save tree, replacing any earlier one."""
+    key = {"user_id": user_id, "is_modded": is_modded}
+    db.progress_snapshots().replace_one(
+        key, {**key, "data": data, "uploaded_at": now()}, upsert=True
     )
-
-    def __repr__(self) -> str:
-        return f"<ProgressSnapshot user={self.user_id} modded={self.is_modded}>"

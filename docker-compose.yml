@@ -1,0 +1,26 @@
+# MongoDB for local development.
+#
+#     docker compose up -d
+#
+# The port is published on 127.0.0.1 rather than 0.0.0.0 deliberately. There is
+# no authentication configured, so binding to every interface would put an open
+# database holding uploaded save files on the local network.
+
+services:
+  mongo:
+    image: mongo:8
+    container_name: sts2-mongo
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  mongo-data:

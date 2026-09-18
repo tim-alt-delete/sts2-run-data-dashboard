@@ -1,9 +1,14 @@
 """Self-check for the dashboard.
 
-Runs without the game installed, against fixture save data and an in-memory
-database, so you can confirm the install works before uploading anything real.
+Runs without the game installed, against fixture save data, so you can confirm
+the install works before uploading anything real.
 
+    docker compose up -d               # MongoDB has no in-memory mode
     python test_dashboard.py
+
+Each check gets its own throwaway database, dropped when the run finishes, so
+nothing here can touch real data. Point MONGODB_TEST_URI at another server to
+run against that instead.
 
 Fixture key names are taken from the decompiled game source:
 SerializableProgress.cs, CharacterStats.cs, CardStats.cs, UserDataPathProvider.cs
@@ -13,28 +18,81 @@ import io
 import json
 import os
 import re
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 import pandas as pd
+from pymongo import MongoClient
+from pymongo.errors import PyMongoError
 
 import app as dashboard
+import db
+import models
 import sts2data
 import uploads
 from config import TestConfig
-from models import ProgressSnapshot, Run, User, db
+from models import User
 
 PASSWORD = "correct-horse-battery"
 
+# Every database this run created, so the finally in main() can drop the lot
+# even when a check fails.
+_databases: list[str] = []
+
+
+def test_config(**overrides) -> type[TestConfig]:
+    """A TestConfig with a database name no other check will touch.
+
+    Every config used to build an app must go through here, or the database it
+    creates is never recorded and never dropped.
+    """
+    name = f"sts2_test_{uuid4().hex}"
+    _databases.append(name)
+    return type("Config", (TestConfig,), {"MONGODB_DB": name, **overrides})
+
 
 def make_client(username: str | None = "tim"):
-    """A test client, optionally already registered and logged in."""
-    app = dashboard.create_app(TestConfig)
+    """A test client, optionally already registered and logged in.
+
+    The database is unique per app so checks cannot see each other's data,
+    which is what the in-memory SQLite database used to give for free.
+    """
+    app = dashboard.create_app(test_config())
     client = app.test_client()
     if username:
         client.post("/register", data={"username": username, "password": PASSWORD})
     return app, client
+
+
+def drop_test_databases() -> None:
+    client = MongoClient(TestConfig.MONGODB_URI, serverSelectionTimeoutMS=5000)
+    try:
+        for name in _databases:
+            client.drop_database(name)
+    finally:
+        client.close()
+
+
+def require_mongo() -> None:
+    """Stop with an instruction rather than a driver traceback."""
+    try:
+        client = MongoClient(TestConfig.MONGODB_URI, serverSelectionTimeoutMS=5000)
+        try:
+            client.admin.command("ping")
+        finally:
+            client.close()
+    except PyMongoError as exc:
+        sys.exit(
+            f"Cannot reach MongoDB at {TestConfig.MONGODB_URI}.\n"
+            f"Start it with:\n"
+            f"    docker compose up -d\n"
+            f"or set MONGODB_TEST_URI to a server that is running.\n\n"
+            f"{type(exc).__name__}: {exc}"
+        )
+
 
 VANILLA_PROGRESS = {
     "schema_version": 3,
@@ -603,10 +661,7 @@ def check_auth() -> None:
 def check_privacy() -> None:
     app, client = make_client("tim")
     with app.app_context():
-        other = User(username="someone-else")
-        other.set_password(PASSWORD)
-        db.session.add(other)
-        db.session.commit()
+        models.create_user("someone-else", None, PASSWORD)
 
     # someone else's overview is indistinguishable from a name nobody has taken
     assert client.get("/u/someone-else").status_code == 404
@@ -625,11 +680,7 @@ def check_privacy() -> None:
 
 def check_csrf() -> None:
     """CSRF is disabled in TestConfig, so this checks it with protection on."""
-
-    class CsrfConfig(TestConfig):
-        WTF_CSRF_ENABLED = True
-
-    app = dashboard.create_app(CsrfConfig)
+    app = dashboard.create_app(test_config(WTF_CSRF_ENABLED=True))
     client = app.test_client()
     r = client.post("/register", data={"username": "tim", "password": PASSWORD})
     assert r.status_code == 400, "a form without a CSRF token must be rejected"
@@ -718,15 +769,12 @@ def check_upload_folder() -> None:
     ).get_data(as_text=True)
 
     with app.app_context():
-        runs = list(db.session.scalars(db.select(Run)))
-        assert len(runs) == 1, [r.start_time for r in runs]
-        assert runs[0].start_time == 1789424859, "only the finished run is stored"
-        assert db.session.scalar(
-            db.select(db.func.count()).select_from(ProgressSnapshot)
-        ) == 1
-        assert not db.session.scalar(
-            db.select(Run).filter_by(start_time=1789999999)
-        ), "current_run.save is an unfinished run and must never be stored"
+        runs = list(db.runs().find())
+        assert len(runs) == 1, [r["start_time"] for r in runs]
+        assert runs[0]["start_time"] == 1789424859, "only the finished run is stored"
+        assert db.progress_snapshots().count_documents({}) == 1
+        assert not db.runs().find_one({"start_time": 1789999999}), \
+            "current_run.save is an unfinished run and must never be stored"
 
     summary = text_of(re.search(r'<p class="totals">(.*?)</p>', body, re.S).group(1))
     # 9 files in: one finished run, one progress.save, and seven to ignore.
@@ -767,23 +815,23 @@ def check_upload() -> None:
     body = send([("1789424859.run", as_json(run))]).get_data(as_text=True)
     assert "1 added" in re.sub(r"\s+", " ", body).replace("<strong>", "").replace("</strong>", "")
     with app.app_context():
-        stored = db.session.scalar(db.select(Run))
-        assert stored.start_time == 1789424859
-        assert stored.character == "IRONCLAD" and stored.result == "Win"
-        assert stored.ascension == 4 and stored.seed == "3J6ZXDRGZE"
-        assert stored.build == "v0.107.1" and stored.floors == 5
-        assert stored.is_modded is False
-        assert stored.data["seed"] == "3J6ZXDRGZE", "the raw file is kept intact"
+        stored = db.runs().find_one()
+        assert stored["start_time"] == 1789424859
+        assert stored["character"] == "IRONCLAD" and stored["result"] == "Win"
+        assert stored["ascension"] == 4 and stored["seed"] == "3J6ZXDRGZE"
+        assert stored["build"] == "v0.107.1" and stored["floors"] == 5
+        assert stored["is_modded"] is False
+        assert stored["data"]["seed"] == "3J6ZXDRGZE", "the raw file is kept intact"
 
     # re-uploading the same run changes nothing
     send([("1789424859.run", as_json(run))])
     with app.app_context():
-        assert db.session.scalar(db.select(db.func.count()).select_from(Run)) == 1
+        assert db.runs().count_documents({}) == 1
 
-    # the same run twice inside one request must not trip the unique constraint
+    # the same run twice inside one request must not trip the unique index
     send([("a.run", as_json(run)), ("b.run", as_json(run))])
     with app.app_context():
-        assert db.session.scalar(db.select(db.func.count()).select_from(Run)) == 1
+        assert db.runs().count_documents({}) == 1
 
     # rejections
     for name, payload, expected in (
@@ -801,7 +849,7 @@ def check_upload() -> None:
         body = send([(name, payload)]).get_data(as_text=True)
         assert expected in body, f"{name} should report {expected!r}, got: {body[-400:]}"
     with app.app_context():
-        assert db.session.scalar(db.select(db.func.count()).select_from(Run)) == 1, \
+        assert db.runs().count_documents({}) == 1, \
             "no rejected file may reach the database"
 
     # oversized
@@ -814,9 +862,8 @@ def check_upload() -> None:
     assert "lifetime totals (vanilla)" in body
     send([("progress.save", as_json(VANILLA_PROGRESS))])
     with app.app_context():
-        assert db.session.scalar(
-            db.select(db.func.count()).select_from(ProgressSnapshot)
-        ) == 1, "re-uploading progress.save replaces it rather than piling up"
+        assert db.progress_snapshots().count_documents({}) == 1, \
+            "re-uploading progress.save replaces it rather than piling up"
 
     print("upload          ok")
 
@@ -842,7 +889,7 @@ def check_upload_modded() -> None:
     send([("steam/765/profile1/saves/history/1789424861.run", third)])
 
     with app.app_context():
-        by_start = {r.start_time: r.is_modded for r in db.session.scalars(db.select(Run))}
+        by_start = {r["start_time"]: r["is_modded"] for r in db.runs().find()}
         assert by_start == {1789424859: True, 1789424860: True, 1789424861: False}, by_start
 
     assert uploads.is_modded_path("a/modded/profile1/x.run") is True
@@ -884,24 +931,30 @@ def check_upload_privacy() -> None:
 
 
 def main() -> None:
-    check_parsing()
-    check_lifetime_totals()
-    check_derived_aggregates()
-    check_card_stats()
-    check_derived_matches_progress()
-    check_auth()
-    check_privacy()
-    check_csrf()
-    check_secret_key()
-    check_upload()
-    check_upload_form()
-    check_upload_folder()
-    check_upload_modded()
-    check_upload_privacy()
-    check_run_pages()
-    check_overview_page()
-    check_run_pages_modded()
-    check_run_pages_privacy()
+    require_mongo()
+    try:
+        check_parsing()
+        check_lifetime_totals()
+        check_derived_aggregates()
+        check_card_stats()
+        check_derived_matches_progress()
+        check_auth()
+        check_privacy()
+        check_csrf()
+        check_secret_key()
+        check_upload()
+        check_upload_form()
+        check_upload_folder()
+        check_upload_modded()
+        check_upload_privacy()
+        check_run_pages()
+        check_overview_page()
+        check_run_pages_modded()
+        check_run_pages_privacy()
+    finally:
+        # Even a failed run leaves nothing behind. These are real databases on
+        # a real server, not a process that exits taking its data with it.
+        drop_test_databases()
     print("\nall checks passed")
 
 

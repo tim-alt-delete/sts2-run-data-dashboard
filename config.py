@@ -8,9 +8,6 @@ running in debug or testing mode.
 from __future__ import annotations
 
 import os
-from pathlib import Path
-
-INSTANCE_DIR = Path(__file__).resolve().parent / "instance"
 
 # A .run file is 12-83 KB in practice, and progress.save is larger but still
 # small. The generous overall cap exists so a whole save folder (the game keeps
@@ -27,10 +24,11 @@ class Config:
 
     SECRET_KEY = os.environ.get("SECRET_KEY")
 
-    SQLALCHEMY_DATABASE_URI = os.environ.get(
-        "DATABASE_URL", f"sqlite:///{INSTANCE_DIR / 'app.db'}"
-    )
-    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    MONGODB_URI = os.environ.get("MONGODB_URI", "mongodb://localhost:27017")
+    MONGODB_DB = os.environ.get("MONGODB_DB", "sts2_dashboard")
+    # Long enough to ride out a server that is still starting, short enough
+    # that a server which is not running fails visibly instead of hanging.
+    MONGODB_TIMEOUT_MS = int(os.environ.get("MONGODB_TIMEOUT_MS", "5000"))
 
     MAX_CONTENT_LENGTH = MAX_CONTENT_LENGTH
 
@@ -45,11 +43,19 @@ class Config:
 
 
 class TestConfig(Config):
-    """In-memory database, and CSRF disabled so tests can post plain forms."""
+    """Throwaway database, and CSRF disabled so tests can post plain forms.
+
+    MongoDB has no in-memory mode, so the self-check needs a real server. Each
+    test overrides MONGODB_DB with a unique name and drops it afterwards, which
+    is what keeps checks isolated from each other and from real data.
+    """
 
     TESTING = True
     SECRET_KEY = "test-secret-key"
-    SQLALCHEMY_DATABASE_URI = "sqlite://"
+    MONGODB_URI = os.environ.get(
+        "MONGODB_TEST_URI", os.environ.get("MONGODB_URI", "mongodb://localhost:27017")
+    )
+    MONGODB_DB = "sts2_dashboard_test"
     WTF_CSRF_ENABLED = False
 
 

@@ -151,6 +151,33 @@ def validate_progress(obj: Any) -> str | None:
     return None
 
 
+def unsafe_key(obj: Any) -> str | None:
+    """The first field name MongoDB cannot store comfortably, or None.
+
+    A key containing a dot, or starting with a dollar, collides with MongoDB's
+    query syntax and is painful to read back even where the server accepts it.
+    Nothing the game exports today uses one -- 115 distinct keys across the
+    archived runs, none of them affected -- but storing the export verbatim is
+    the whole point of this design, and a game update is exactly what would
+    introduce one. Catching it here turns a driver error deep inside a write
+    into an actionable line on the upload page.
+
+    Iterative rather than recursive: the input is attacker-supplied and deep
+    nesting should not cost a stack frame per level.
+    """
+    stack: list[Any] = [obj]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if "." in key or key.startswith("$"):
+                    return key
+                stack.append(value)
+        elif isinstance(current, list):
+            stack.extend(current)
+    return None
+
+
 def run_metadata(obj: dict) -> dict[str, Any]:
     """The columns worth having outside the JSON blob."""
     player = (obj.get("players") or [{}])[0]
@@ -211,6 +238,13 @@ def parse_file(storage, force_modded: bool = False) -> ParsedFile:
         parsed.error = validate_run(obj)
 
     if parsed.ok:
+        bad = unsafe_key(obj)
+        if bad is not None:
+            parsed.error = (
+                f"Field name {bad!r} cannot be stored: names must not contain "
+                f"'.' or start with '$'."
+            )
+            return parsed
         parsed.data = obj
         if parsed.kind == RUN_KIND:
             parsed.metadata = run_metadata(obj)
