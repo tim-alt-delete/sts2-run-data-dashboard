@@ -269,12 +269,52 @@ agree field by field, including that abandons fold into losses on the
 `progress.save` side only.
 
 Known ceiling: the overview loads every run's JSON on each request to rebuild
-the aggregates. Fine for hundreds of runs, wasteful for many thousands. Cache
-or precompute when that matters.
+the aggregates. Fine for hundreds of runs, wasteful for many thousands. See
+[Cache the overview aggregates](#cache-the-overview-aggregates) under future
+work.
 
 ---
 
 ## 5. Future work
+
+### Cache the overview aggregates
+
+**Status: wanted. The current behaviour is a known, deliberate stopgap.**
+
+`GET /u/<username>` rebuilds every statistic from scratch on each request. That
+means loading the `data` JSON blob of every run the user owns, then recomputing
+the totals, the character table and the card table, only to throw all of it
+away when the page is rendered. A refresh redoes the lot.
+
+At 8 runs this is imperceptible. The cost is linear in runs and each blob is
+12-83 KB, so a user with the game's full 100-run history moves roughly 8 MB per
+page view, and an account that has been archiving for a year would be far
+worse. The card table is the expensive part: it walks every map point of every
+run to count reward screens.
+
+Options, roughly in order of effort:
+
+1. **Cache the rendered aggregates per user**, keyed on something that changes
+   when the data does — the user's run count plus the latest `uploaded_at` is
+   enough, since runs are immutable once stored and only ever added. A plain
+   in-process dict works for a single worker; Redis or a table if it ever runs
+   multi-process. Invalidation is trivial because nothing mutates a stored run.
+2. **Precompute on upload.** Ingest already touches every run it stores, so the
+   per-run contribution to each aggregate could be derived there and kept in a
+   summary table. Turns page load into a cheap `GROUP BY`. More moving parts,
+   and a schema change, so it wants migrations in place first.
+3. **Push the simple parts into SQL.** Totals and most of the character table
+   only need the metadata columns that already exist, so they could be a single
+   aggregate query today. Only the card table genuinely needs the JSON, since
+   card counts come from deck contents and reward screens.
+
+Option 3 is the cheapest real win and needs no new storage: it would leave the
+JSON blobs untouched for everything except the card table. Option 1 is the
+smallest change overall. Option 2 is the right end state but should wait for
+migrations.
+
+Worth doing when a page load becomes noticeable, or before opening the app to
+other users, since the cost is per-user and concurrent.
 
 ### Database migrations
 
