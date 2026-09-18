@@ -46,6 +46,11 @@ Nothing extra is needed to use it: the sidecar sits in the same `saves/history/`
 folder, so the upload above collects it, and a **Card utility** table appears on
 that run's detail page. Runs without one render exactly as before.
 
+Building the mod, loading it and checking it works are covered in
+`../DataExporter/docs/TESTING.md`. Note that running any mod moves your saves
+into a `modded/` subfolder, so those runs appear under this dashboard's *modded*
+filter rather than the default view.
+
 Damage from Poison, Thorns and relics arrives with no card attached to it, so it
 cannot be credited to one. That amount is reported separately as *unattributed*
 rather than hidden — when it is a large share of the total, read the per-card
