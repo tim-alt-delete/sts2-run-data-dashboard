@@ -18,6 +18,9 @@ import sts2data
 # from exhausting memory.
 MAX_RUN_BYTES = 2 * 1024 * 1024
 MAX_PROGRESS_BYTES = 5 * 1024 * 1024
+# One entry per distinct (card, upgrade level) in a run, so a few hundred at
+# most. Generous, but far below the run cap.
+MAX_CARDSTATS_BYTES = 1 * 1024 * 1024
 
 # The game keeps at most 100 run files, so a whole save folder fits with room
 # to spare. Anything beyond this is not a save folder.
@@ -25,6 +28,26 @@ MAX_FILES = 500
 
 RUN_KIND = "run"
 PROGRESS_KIND = "progress"
+CARDSTATS_KIND = "cardstats"
+
+# The only sidecar schema this understands. The mod writes its version into
+# every file so an older dashboard rejects a newer format with an explanation
+# rather than silently reading fields that have moved.
+CARDSTATS_SCHEMA = 1
+
+# The per-card counters, all optional and all defaulting to zero. Listed once
+# so validation, storage and display cannot drift apart.
+CARDSTATS_COUNTERS = (
+    "copies_played",
+    "damage_unblocked",
+    "damage_blocked",
+    "overkill",
+    "kills",
+    "block_gained",
+    "energy_spent",
+    "energy_gained",
+    "cards_drawn",
+)
 
 # A save folder holds plenty of files that are not run history. current_run.save
 # matters most: it is an in-progress run, and it carries start_time, players and
@@ -92,6 +115,10 @@ def classify(filename: str) -> str | None:
     name = display_name(filename).lower()
     if name in IGNORED_NAMES:
         return None
+    # Checked before the .run suffix so that a sidecar, which sits in the same
+    # history folder and is named after the same run, is not mistaken for one.
+    if name.endswith(".cardstats.json"):
+        return CARDSTATS_KIND
     if name.endswith(".run"):
         return RUN_KIND
     if name == "progress.save":
@@ -149,6 +176,80 @@ def validate_progress(obj: Any) -> str | None:
     if "character_stats" not in obj and "card_stats" not in obj:
         return "Not a progress.save: no character_stats or card_stats."
     return None
+
+
+def validate_cardstats(obj: Any) -> str | None:
+    """Why this is not a usable card stats sidecar, or None if it is.
+
+    The sidecar comes from the DataExporter mod rather than the game, so it is
+    the one uploaded file whose format is ours. It still gets the same
+    treatment as everything else: it arrives from a browser, so it is hostile
+    until proven otherwise.
+    """
+    if not isinstance(obj, dict):
+        return "Not a card stats file: expected a JSON object."
+
+    schema = obj.get("schema")
+    if schema != CARDSTATS_SCHEMA:
+        return (
+            f"Card stats schema {schema!r} is not supported; this dashboard "
+            f"reads schema {CARDSTATS_SCHEMA}. Update the dashboard or the mod."
+        )
+
+    start_time = obj.get("start_time")
+    if not isinstance(start_time, int) or isinstance(start_time, bool):
+        return "Not a card stats file: start_time is missing or not a number."
+    if not MIN_START_TIME <= start_time <= MAX_START_TIME:
+        return f"start_time {start_time} is outside the plausible range."
+
+    cards = obj.get("cards")
+    if not isinstance(cards, list):
+        return "Not a card stats file: cards is missing or not a list."
+    for card in cards:
+        if not isinstance(card, dict):
+            return "Not a card stats file: cards contains something that is not an object."
+        if not isinstance(card.get("id"), str) or not card["id"]:
+            return "Not a card stats file: a card entry has no id."
+        level = card.get("upgrade_level", 0)
+        if not isinstance(level, int) or isinstance(level, bool) or level < 0:
+            return "Not a card stats file: upgrade_level is not a non-negative number."
+        error = _counter_error(card)
+        if error:
+            return error
+
+    unattributed = obj.get("unattributed")
+    if unattributed is not None:
+        if not isinstance(unattributed, dict):
+            return "Not a card stats file: unattributed is not an object."
+        error = _counter_error(unattributed)
+        if error:
+            return error
+
+    return None
+
+
+def _counter_error(entry: dict) -> str | None:
+    """Reject a counter that is missing, negative or not a whole number.
+
+    Negative is worth catching rather than clamping: these are sums of damage
+    and block, so a negative one means the mod or the file is wrong, and
+    silently showing it as zero would hide that.
+    """
+    for name in CARDSTATS_COUNTERS:
+        value = entry.get(name, 0)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return f"Not a card stats file: {name} is not a non-negative whole number."
+    return None
+
+
+def cardstats_metadata(obj: dict) -> dict[str, Any]:
+    """The fields worth having outside the JSON blob."""
+    return {
+        "start_time": obj["start_time"],
+        "complete": bool(obj.get("complete", False)),
+        "seed": str(obj.get("seed") or "")[:32],
+        "mod_version": str(obj.get("mod_version") or "")[:32],
+    }
 
 
 def unsafe_key(obj: Any) -> str | None:
@@ -209,7 +310,10 @@ def parse_file(storage, force_modded: bool = False) -> ParsedFile:
         parsed.skipped = "not a run or progress file"
         return parsed
 
-    cap = MAX_PROGRESS_BYTES if parsed.kind == PROGRESS_KIND else MAX_RUN_BYTES
+    cap = {
+        PROGRESS_KIND: MAX_PROGRESS_BYTES,
+        CARDSTATS_KIND: MAX_CARDSTATS_BYTES,
+    }.get(parsed.kind, MAX_RUN_BYTES)
     raw = storage.read(cap + 1)
     if len(raw) > cap:
         parsed.error = f"Larger than the {cap // (1024 * 1024)} MB limit."
@@ -234,6 +338,8 @@ def parse_file(storage, force_modded: bool = False) -> ParsedFile:
 
     if parsed.kind == PROGRESS_KIND:
         parsed.error = validate_progress(obj)
+    elif parsed.kind == CARDSTATS_KIND:
+        parsed.error = validate_cardstats(obj)
     else:
         parsed.error = validate_run(obj)
 
@@ -248,5 +354,7 @@ def parse_file(storage, force_modded: bool = False) -> ParsedFile:
         parsed.data = obj
         if parsed.kind == RUN_KIND:
             parsed.metadata = run_metadata(obj)
+        elif parsed.kind == CARDSTATS_KIND:
+            parsed.metadata = cardstats_metadata(obj)
 
     return parsed

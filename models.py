@@ -16,6 +16,8 @@ Document shapes, for reference rather than enforcement:
     runs                _id, user_id, start_time, is_modded, uploaded_at, data,
                         and the extracted fields in RUN_LIST_FIELDS
     progress_snapshots  _id, user_id, is_modded, uploaded_at, data
+    card_stats          _id, user_id, start_time, is_modded, uploaded_at, data,
+                        complete, seed, mod_version
 """
 
 from __future__ import annotations
@@ -284,4 +286,32 @@ def save_progress_snapshot(user_id: ObjectId, is_modded: bool, data: dict) -> No
     key = {"user_id": user_id, "is_modded": is_modded}
     db.progress_snapshots().replace_one(
         key, {**key, "data": data, "uploaded_at": now()}, upsert=True
+    )
+
+
+# --------------------------------------------------------------------------
+# card stats
+# --------------------------------------------------------------------------
+
+
+def find_card_stats(user_id: ObjectId, start_time: int) -> dict | None:
+    """The card stats sidecar for a run, or None if none was uploaded."""
+    return db.card_stats().find_one({"user_id": user_id, "start_time": start_time})
+
+
+def save_card_stats(
+    user_id: ObjectId, is_modded: bool, data: dict, metadata: dict[str, Any]
+) -> None:
+    """Store a sidecar, replacing any earlier one for the same run.
+
+    Replace rather than insert because the mod rewrites the file after every
+    combat, so the same run's sidecar is uploaded repeatedly and each version
+    supersedes the last. The totals are cumulative, never deltas, so the newest
+    file is always the complete picture.
+    """
+    key = {"user_id": user_id, "start_time": metadata["start_time"]}
+    db.card_stats().replace_one(
+        key,
+        {**key, **metadata, "is_modded": is_modded, "data": data, "uploaded_at": now()},
+        upsert=True,
     )

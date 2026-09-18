@@ -63,6 +63,34 @@
   <h2>Deck</h2>
   {{ deck|safe }}
 
+  {% if card_stats %}
+    <h2>Card utility</h2>
+    <p class="note">
+      What each card actually did this run, from the DataExporter mod.
+      <strong>{{ card_stats_summary.plays }}</strong> plays across
+      <strong>{{ card_stats_summary.cards_tracked }}</strong> cards.
+      {%- if not card_stats_summary.complete %}
+        <span class="warn">Run unfinished when this was written, so the totals are partial.</span>
+      {%- endif %}
+    </p>
+    {{ card_stats|safe }}
+    {% if card_stats_summary.unattributed_damage or card_stats_summary.unattributed_block %}
+      <p class="note">
+        Not attributed to any card:
+        <strong>{{ card_stats_summary.unattributed_damage }}</strong> damage
+        {%- if card_stats_summary.unattributed_share %}
+          ({{ card_stats_summary.unattributed_share }}% of the total)
+        {%- endif %}
+        {%- if card_stats_summary.unattributed_block %},
+          <strong>{{ card_stats_summary.unattributed_block }}</strong> block
+        {%- endif %}.
+        Poison, Thorns and relics deal damage with no card attached, so it
+        cannot be credited to one. Treat the per-card numbers as a lower bound
+        when this share is large.
+      </p>
+    {% endif %}
+  {% endif %}
+
   <h2>Relics</h2>
   {{ relics|safe }}
 {% endif %}

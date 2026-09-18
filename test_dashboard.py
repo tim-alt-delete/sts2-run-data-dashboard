@@ -224,6 +224,42 @@ RUN_FILES = {
 }
 
 
+# A card stats sidecar as the DataExporter mod writes it. Taken from the mod's
+# real serializer output, so this doubles as a check that the two repos still
+# agree on the wire format. Keyed to the 1789424859 fixture run, whose deck
+# holds 2x Strike Ironclad, 1x Bash+ and 1x Stomp.
+CARD_STATS_FILE = {
+    "schema": 1,
+    "mod_version": "0.1.0",
+    "start_time": 1789424859,
+    "seed": "3J6ZXDRGZE",
+    "complete": True,
+    "cards": [
+        {
+            "id": "CARD.BASH", "upgrade_level": 1, "copies_played": 2,
+            "damage_unblocked": 30, "damage_blocked": 6, "overkill": 2, "kills": 1,
+            "block_gained": 0, "energy_spent": 4, "energy_gained": 0, "cards_drawn": 0,
+        },
+        {
+            "id": "CARD.STRIKE_IRONCLAD", "upgrade_level": 0, "copies_played": 8,
+            "damage_unblocked": 48, "damage_blocked": 12, "overkill": 0, "kills": 2,
+            "block_gained": 0, "energy_spent": 8, "energy_gained": 0, "cards_drawn": 0,
+        },
+        {
+            # Played, but not in the final deck: covers the "in deck 0" join.
+            "id": "CARD.OFFERING", "upgrade_level": 0, "copies_played": 1,
+            "damage_unblocked": 0, "damage_blocked": 0, "overkill": 0, "kills": 0,
+            "block_gained": 0, "energy_spent": 0, "energy_gained": 2, "cards_drawn": 3,
+        },
+    ],
+    "unattributed": {
+        "id": "", "upgrade_level": 0, "copies_played": 0,
+        "damage_unblocked": 26, "damage_blocked": 0, "overkill": 0, "kills": 0,
+        "block_gained": 5, "energy_spent": 0, "energy_gained": 0, "cards_drawn": 0,
+    },
+}
+
+
 def check_parsing() -> None:
     run = RUN_FILES["1789424859.run"]
     summary = sts2data.run_summary(run)
@@ -590,6 +626,151 @@ def check_run_pages_privacy() -> None:
     print("run pages priv  ok")
 
 
+def send_card_stats(client, obj, name="1789424859.cardstats.json"):
+    return client.post(
+        "/upload",
+        data={"files": [(io.BytesIO(json.dumps(obj).encode()), name)]},
+        content_type="multipart/form-data",
+    )
+
+
+def check_card_utility() -> None:
+    """Per-card metrics from the DataExporter mod sidecar.
+
+    Distinct from check_card_stats, which is about the card_stats key inside
+    progress.save. Same words, unrelated data: that one is lifetime win rates
+    per card, this one is what a card did during a single run.
+    """
+    app, client = make_client("tim")
+
+    # Classification is by name, before the .run suffix check, so a sidecar
+    # sitting in the same history folder is never mistaken for a run.
+    assert uploads.classify("saves/history/1789424859.cardstats.json") == uploads.CARDSTATS_KIND
+    assert uploads.classify("saves/history/1789424859.run") == uploads.RUN_KIND
+
+    # Arrives before its run: the mod writes it after every combat, so this is
+    # the normal case, not an edge case. It must store rather than be rejected.
+    body = send_card_stats(client, CARD_STATS_FILE).get_data(as_text=True)
+    assert "3 cards" in body, body[-500:]
+    assert "1 card stats file" in text_of(body), text_of(body)[-400:]
+    with app.app_context():
+        assert db.card_stats().count_documents({}) == 1
+        stored = db.card_stats().find_one()
+        assert stored["start_time"] == 1789424859
+        assert stored["complete"] is True and stored["mod_version"] == "0.1.0"
+        assert stored["data"]["cards"][0]["id"] == "CARD.BASH", "raw file kept intact"
+
+    # Re-uploading replaces rather than accumulating: the mod rewrites the same
+    # file after every combat with cumulative totals, so the newest wins.
+    grown = json.loads(json.dumps(CARD_STATS_FILE))
+    grown["cards"][1]["copies_played"] = 11
+    send_card_stats(client, grown)
+    with app.app_context():
+        assert db.card_stats().count_documents({}) == 1, "one sidecar per run"
+        assert db.card_stats().find_one()["data"]["cards"][1]["copies_played"] == 11
+
+    # The run page joins them on start_time.
+    upload_runs(client, ["1789424859.run"])
+    page = client.get("/u/tim/run/1789424859").get_data(as_text=True)
+    assert "Card utility" in page
+    table = text_of(page.split("Card utility", 1)[1])
+    assert "Strike Ironclad" in table and "Bash+" in table
+    assert "14 plays across 3 cards" in table, table[:400]
+
+    # Built from what the database actually returned, so the whole round trip
+    # is covered rather than just the in-memory fixture.
+    with app.app_context():
+        round_tripped = db.card_stats().find_one()["data"]
+    rows = sts2data.card_stats_table(
+        round_tripped, RUN_FILES["1789424859.run"]
+    ).to_dict("records")
+    by_card = {r["card"]: r for r in rows}
+    assert [r["card"] for r in rows] == ["Strike Ironclad", "Bash+", "Offering"], \
+        "sorted by damage, so the biggest contributor reads first"
+    assert by_card["Strike Ironclad"]["in deck"] == 2, "joins to the final deck by id and level"
+    assert by_card["Bash+"]["in deck"] == 1, "upgrade level is part of the join key"
+    assert by_card["Offering"]["in deck"] == 0, "played but not in the final deck"
+    assert by_card["Bash+"]["damage/play"] == 15.0, "30 damage over 2 plays"
+    assert by_card["Offering"]["energy"] == -2, "a card that gives energy back reads negative"
+    assert by_card["Offering"]["drawn"] == 3
+
+    # The unattributed bucket is reported, not silently folded into the totals.
+    summary = sts2data.card_stats_summary(grown)
+    assert summary["card_damage"] == 78 and summary["unattributed_damage"] == 26
+    assert summary["unattributed_share"] == 25.0, "26 of 104"
+    assert "26" in table and "25.0% of the total" in table, table[-600:]
+
+    # An unfinished run says so rather than presenting partial totals as final.
+    partial = json.loads(json.dumps(CARD_STATS_FILE))
+    partial["complete"] = False
+    send_card_stats(client, partial)
+    page = client.get("/u/tim/run/1789424859").get_data(as_text=True)
+    assert "Run unfinished when this was written" in text_of(page)
+
+    # A run with no sidecar renders exactly as before.
+    upload_runs(client, ["1789508732.run"])
+    assert "Card utility" not in client.get("/u/tim/run/1789508732").get_data(as_text=True)
+
+    print("card utility    ok")
+
+
+def check_card_utility_rejections() -> None:
+    """The sidecar is our own format, but it still arrives from a browser."""
+    app, client = make_client("tim")
+
+    def bad(**changes):
+        obj = json.loads(json.dumps(CARD_STATS_FILE))
+        obj.update(changes)
+        return obj
+
+    cases = [
+        (bad(schema=2), "schema"),
+        (bad(schema=None), "schema"),
+        (bad(start_time="soon"), "start_time"),
+        (bad(start_time=99999999999), "plausible range"),
+        (bad(cards="lots"), "cards is missing or not a list"),
+        (bad(cards=[{"upgrade_level": 0}]), "no id"),
+        (bad(cards=[{"id": "CARD.X", "upgrade_level": -1}]), "upgrade_level"),
+        # Negative is rejected rather than clamped: these are sums, so a
+        # negative one means the file is wrong and hiding it would hide that.
+        (bad(cards=[{"id": "CARD.X", "damage_unblocked": -5}]), "non-negative"),
+        (bad(cards=[{"id": "CARD.X", "kills": 1.5}]), "non-negative"),
+        (bad(unattributed="none"), "unattributed is not an object"),
+        (bad(unattributed={"block_gained": -1}), "non-negative"),
+    ]
+    for payload, expected in cases:
+        body = send_card_stats(client, payload).get_data(as_text=True)
+        assert expected in body, f"expected {expected!r}, got: {text_of(body)[-300:]}"
+
+    body = send_card_stats(client, [1, 2, 3]).get_data(as_text=True)
+    assert "expected a JSON object" in body
+
+    with app.app_context():
+        assert db.card_stats().count_documents({}) == 0, \
+            "no rejected sidecar may reach the database"
+
+    print("card utility rej ok")
+
+
+def check_card_utility_privacy() -> None:
+    """One user's card stats are not reachable through another's run page."""
+    app, client = make_client("tim")
+    upload_runs(client, ["1789424859.run"])
+    send_card_stats(client, CARD_STATS_FILE)
+
+    _app2, other = make_client("someone-else")
+    upload_runs(other, ["1789424859.run"])
+    page = other.get("/u/someone-else/run/1789424859").get_data(as_text=True)
+    assert page.count("Card utility") == 0, \
+        "card stats are scoped to their owner, not shared by start_time"
+
+    with app.app_context():
+        assert db.card_stats().count_documents({}) == 1
+
+    print("card utility priv ok")
+
+
+
 def text_of(html: str) -> str:
     """Visible text with runs of whitespace collapsed.
 
@@ -951,6 +1132,9 @@ def main() -> None:
         check_overview_page()
         check_run_pages_modded()
         check_run_pages_privacy()
+        check_card_utility()
+        check_card_utility_rejections()
+        check_card_utility_privacy()
     finally:
         # Even a failed run leaves nothing behind. These are real databases on
         # a real server, not a process that exits taking its data with it.

@@ -74,6 +74,10 @@ def progress_snapshots() -> Collection:
     return get_db()["progress_snapshots"]
 
 
+def card_stats() -> Collection:
+    return get_db()["card_stats"]
+
+
 def ensure_indexes() -> None:
     """Create the indexes the application depends on, and prove the server is up.
 
@@ -114,6 +118,15 @@ def ensure_indexes() -> None:
             [("user_id", ASCENDING), ("is_modded", ASCENDING)],
             unique=True,
             name="uq_progress_user_modded",
+        )
+        # One card stats sidecar per run. Keyed the same way as runs, but a
+        # separate collection rather than a field on the run: the mod writes
+        # the sidecar after every combat, so it usually arrives before the
+        # .run file exists and must be storable without one.
+        card_stats().create_index(
+            [("user_id", ASCENDING), ("start_time", ASCENDING)],
+            unique=True,
+            name="uq_cardstats_user_start",
         )
     except ServerSelectionTimeoutError as exc:
         uri = current_app.config["MONGODB_URI"]

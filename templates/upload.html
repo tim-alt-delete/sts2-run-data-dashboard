@@ -53,6 +53,9 @@
       {%- if results.progress %} &middot;
         <strong>{{ results.progress }}</strong> progress file{{ '' if results.progress == 1 else 's' }}
       {%- endif %}
+      {%- if results.card_stats %} &middot;
+        <strong>{{ results.card_stats }}</strong> card stats file{{ '' if results.card_stats == 1 else 's' }}
+      {%- endif %}
       {%- if results.skipped %} &middot;
         <span class="note">{{ results.skipped }} other file{{ '' if results.skipped == 1 else 's' }} ignored</span>
       {%- endif %}

@@ -254,6 +254,9 @@ def register_user_routes(app: Flask) -> None:
             ), 404
 
         data = run["data"]
+        # Optional: only present if the user runs the DataExporter mod and
+        # uploaded its sidecar. Everything else on this page works without it.
+        stats = models.find_card_stats(user.id, run_id)
         return render_template(
             "run.html",
             user=user,
@@ -263,6 +266,14 @@ def register_user_routes(app: Flask) -> None:
             path_rows=sts2data.run_path_table(data).to_dict("records"),
             deck=sts2data.deck_table(data).to_html(**TABLE_OPTIONS),
             relics=sts2data.relic_table(data).to_html(**TABLE_OPTIONS),
+            card_stats=(
+                sts2data.card_stats_table(stats["data"], data).to_html(**TABLE_OPTIONS)
+                if stats
+                else None
+            ),
+            card_stats_summary=(
+                sts2data.card_stats_summary(stats["data"]) if stats else None
+            ),
         )
 
     @app.route("/upload", methods=["GET", "POST"])
@@ -291,6 +302,7 @@ def ingest(files, user, force_modded: bool) -> dict:
     """Validate and store an upload, reporting what happened to each file."""
     existing = models.existing_start_times(user.id)
     rows, added, duplicate, rejected, progress_saved, skipped = [], 0, 0, 0, 0, 0
+    card_stats_saved = 0
     pending: list[dict] = []
     # Where each pending run's row sits, so it can be relabelled if the insert
     # turns out to have lost a race.
@@ -315,6 +327,19 @@ def ingest(files, user, force_modded: bool) -> dict:
             progress_saved += 1
             tree = "modded" if parsed.is_modded else "vanilla"
             rows.append((parsed.filename, "stored", f"lifetime totals ({tree})"))
+            continue
+
+        if parsed.kind == uploads.CARDSTATS_KIND:
+            # Stored whether or not the matching run is here yet. The mod
+            # rewrites this after every combat, so it routinely arrives before
+            # the run finishes; the run page joins them when both exist.
+            models.save_card_stats(
+                user.id, parsed.is_modded, parsed.data, parsed.metadata
+            )
+            card_stats_saved += 1
+            cards = len(parsed.data.get("cards") or [])
+            state = "" if parsed.metadata["complete"] else ", run unfinished"
+            rows.append((parsed.filename, "stored", f"{cards} cards{state}"))
             continue
 
         start_time = parsed.metadata["start_time"]
@@ -355,6 +380,7 @@ def ingest(files, user, force_modded: bool) -> dict:
         "duplicate": duplicate,
         "rejected": rejected,
         "progress": progress_saved,
+        "card_stats": card_stats_saved,
         "skipped": skipped,
     }
 

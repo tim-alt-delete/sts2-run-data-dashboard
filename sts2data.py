@@ -363,6 +363,106 @@ def deck_table(run: dict) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["card", "count"])
 
 
+CARD_STATS_COLUMNS = [
+    "card",
+    "in deck",
+    "played",
+    "damage",
+    "blocked",
+    "block",
+    "energy",
+    "drawn",
+    "damage/play",
+    "block/play",
+]
+
+
+def deck_counts(run: dict) -> dict[tuple[str, int], int]:
+    """How many copies of each (card id, upgrade level) the final deck holds.
+
+    Keyed the way the mod keys its metrics, so the two join exactly. A card
+    played during the run but removed or transformed before the end simply has
+    no entry, which is why "in deck" can be 0 while "played" is not.
+    """
+    counts: dict[tuple[str, int], int] = {}
+    player = (run.get("players") or [{}])[0]
+    for card in player.get("deck") or []:
+        key = (card.get("id") or "", card.get("current_upgrade_level", 0) or 0)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def card_stats_table(stats: dict, run: dict | None = None) -> pd.DataFrame:
+    """Per-card utility for one run, from the DataExporter mod's sidecar.
+
+    The point of this table is an apples-to-apples comparison, so the totals
+    are accompanied by per-play averages: a Strike played twelve times and a
+    Bash played twice are not comparable on raw damage alone.
+
+    Rows are sorted by damage then block then name, all in Python. pandas'
+    default sort is quicksort and is not stable, so ties would come out in a
+    different order on every render.
+    """
+    in_deck = deck_counts(run) if run else {}
+
+    rows = []
+    for card in stats.get("cards") or []:
+        card_id = card.get("id") or ""
+        level = card.get("upgrade_level", 0) or 0
+        played = card.get("copies_played", 0) or 0
+        damage = card.get("damage_unblocked", 0) or 0
+        block = card.get("block_gained", 0) or 0
+        name = humanize(entry(card_id)) + "+" * level
+        rows.append(
+            {
+                "card": name,
+                "in deck": in_deck.get((card_id, level), 0),
+                "played": played,
+                "damage": damage,
+                "blocked": card.get("damage_blocked", 0) or 0,
+                "block": block,
+                # Net energy: a card that gives back more than it costs reads
+                # as negative, which is the interesting case.
+                "energy": (card.get("energy_spent", 0) or 0)
+                - (card.get("energy_gained", 0) or 0),
+                "drawn": card.get("cards_drawn", 0) or 0,
+                "damage/play": round(damage / played, 1) if played else None,
+                "block/play": round(block / played, 1) if played else None,
+            }
+        )
+
+    rows.sort(key=lambda r: (-r["damage"], -r["block"], r["card"]))
+    return pd.DataFrame(rows, columns=CARD_STATS_COLUMNS)
+
+
+def card_stats_summary(stats: dict) -> dict:
+    """Headline numbers and the caveats that make them readable.
+
+    `unattributed` is the honest part. Damage from Poison, Thorns and relic
+    procs reaches the game with no card attached to it, so the mod cannot
+    assign it. Reporting the share here means a deck built on damage over time
+    reads as "most of my damage is unattributed" rather than "my cards did
+    nothing".
+    """
+    cards = stats.get("cards") or []
+    unattributed = stats.get("unattributed") or {}
+
+    card_damage = sum(c.get("damage_unblocked", 0) or 0 for c in cards)
+    other_damage = unattributed.get("damage_unblocked", 0) or 0
+    total_damage = card_damage + other_damage
+
+    return {
+        "complete": bool(stats.get("complete", False)),
+        "mod_version": stats.get("mod_version") or "",
+        "cards_tracked": len(cards),
+        "plays": sum(c.get("copies_played", 0) or 0 for c in cards),
+        "card_damage": card_damage,
+        "unattributed_damage": other_damage,
+        "unattributed_block": unattributed.get("block_gained", 0) or 0,
+        "unattributed_share": percent(other_damage, total_damage),
+    }
+
+
 def relic_table(run: dict) -> pd.DataFrame:
     """Relics held at the end, with where each came from.
 
