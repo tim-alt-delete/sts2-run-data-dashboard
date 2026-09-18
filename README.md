@@ -73,6 +73,10 @@ What *is* declared is the set of indexes, in `db.py`. They are created on every
 start and enforce the guarantees the app depends on: one account per username,
 one run per (user, start time), one card stats sidecar per run.
 
+**MongoDB 5.0 or later is required.** Mods write field names containing dots —
+BaseLib stamps a C# type name onto every card — and earlier servers refuse to
+store those. The compose file pins `mongo:8`.
+
 ## Outside local development
 
 `FLASK_DEBUG=1` falls back to a throwaway signing key. Anywhere else, set a real

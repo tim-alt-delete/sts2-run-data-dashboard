@@ -103,10 +103,47 @@ uniqueness is an integrity guarantee rather than a shape:
 | `progress_snapshots` | `(user_id, is_modded)` unique | one snapshot per save tree |
 | `card_stats` | `(user_id, start_time)` unique | one sidecar per run; a re-upload replaces it |
 
-`dashboard/archive/` is an orphan: 8 `.run` files left over from the
+`dashboard/archive/` is an orphan: 9 `.run` files left over from the
 pre-upload flow, gitignored, no longer read or written by any code path. Still
 useful as a cold backup of runs the game may have since pruned, and the
-verification data for every change (see Conventions).
+verification data for every change (see Conventions). 8 vanilla, plus
+`steam_76561198182361854_modded_profile1/1789685995.run`, which is the first
+run recorded with a mod loaded and the regression case for field names.
+
+### Field names
+
+**Requires MongoDB 5.0 or later.** Uploaded documents may contain field names
+with dots and dollar signs, which earlier servers refuse outright. The compose
+file pins `mongo:8`.
+
+Uploads are only checked for the one name BSON genuinely rejects: a key
+containing a NUL byte. Everything else is stored as-is.
+
+It was stricter, and the strictness was a mistake worth recording. The original
+guard rejected any key containing `.` or starting with `$`, reasoning that they
+collide with query syntax. They do — but only when a name is used as a *query
+path*, and nothing here does that. Meanwhile BaseLib, which every StS2 mod
+depends on, writes
+
+```
+"save_dict_List[BaseLib.Abstracts.CardModifier+ModifierSave]": {...}
+```
+
+onto **every card** in the deck and in every card choice: 140 occurrences in the
+run that exposed this, each one an empty placeholder. So every run recorded with
+any mod installed was refused, and the error named a constraint the uploader
+could do nothing about.
+
+Verified before relaxing it, rather than assumed: BSON encodes and decodes
+dotted and `$`-prefixed names unchanged, mongod 7.0.43 stores and returns them
+identically, and the real 96 KB modded run round-trips byte-for-byte.
+
+**The invariant this depends on:** never build a query from a key or value
+inside `data`. It is attacker-controlled, so a field name like `$ne` is inert in
+storage but injection the moment it reaches a query document. `data` is read as
+a whole blob and never filtered or indexed on. The same warning is in
+`models.py`, next to the document shapes, because that is where someone would go
+looking before adding a query.
 
 ### Why MongoDB
 
@@ -357,6 +394,10 @@ with `$`. Nothing the game exports uses one today — 115 distinct keys across
 the archived runs, none affected — but storing the export verbatim is the whole
 point, and a game update is exactly what would introduce one.
 
+**That guard was wrong and was removed in phase 7.** Its premise — that MongoDB
+cannot store such names — is false, and the caution cost far more than it saved.
+See [Field names](#field-names).
+
 Testing changed shape: MongoDB has no in-memory mode, so the self-check needs a
 running server. Each check gets a uniquely-named database, dropped in a
 `finally` so a failed run leaves nothing behind, and `main()` pings first so an
@@ -414,6 +455,26 @@ lower bound when that share is large.
 Verified against the 8 real archived runs with a sidecar generated from each
 run's real deck: 155 card rows, every one joined to a real deck entry, and the
 per-run row count matching the number of distinct cards in that deck.
+
+### Phase 7 — accept field names MongoDB can store (done)
+
+The guard from phase 5 made every modded run unuploadable. BaseLib stamps a C#
+generic type name onto every card, and a C# type name contains dots. Rejecting
+those refused the whole run over a constraint that does not exist, with an error
+the uploader could not act on. Replaced with a check for the only name BSON
+actually refuses, one containing a NUL byte. Full reasoning under
+[Field names](#field-names).
+
+Two things went wrong here that are worth separating. The guard was written
+against an assumption about MongoDB that was never tested — and it was the one
+piece of `uploads.py` with **no coverage in the suite**, exercised only by a
+throwaway script that has since been deleted. An untested guard enforcing an
+unverified rule survived until real data hit it.
+
+`check_field_names` now covers both directions: a run carrying BaseLib's key,
+plus deliberately hostile `$ne` and `$where` names, uploads and round-trips
+unchanged and its page still renders; a NUL byte is refused and nothing reaches
+the database.
 
 ---
 
@@ -560,8 +621,9 @@ accounts.
   Needs `docker compose up -d` first. Every check prints `name ok`. Current
   checks: parsing, lifetime totals, derived stats, card stats,
   derived==progress, auth, privacy, csrf, secret key, upload, upload form,
-  upload folder, upload modded, upload privacy, run pages, overview page, run
-  pages mod, run pages priv, card utility, card utility rej, card utility priv.
+  upload folder, upload modded, field names, upload privacy, run pages,
+  overview page, run pages mod, run pages priv, card utility, card utility rej,
+  card utility priv.
   Any config used to build an app must come from `test_config()`, or the
   database it creates is never dropped.
   Note `check_card_stats` and `check_card_utility` are unrelated despite the
